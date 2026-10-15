@@ -82,6 +82,29 @@ export interface Command {
   updated_at: string;
 }
 
+export interface Log {
+  id: number;
+  app_id: string;
+  message: string;
+  level: "info" | "warn" | "error";
+  details?: Record<string, any>;
+  created_at: string;
+}
+
+export interface GatewayStatus {
+  connected: boolean;
+  last_ping_at?: string;
+  guild_count: number;
+}
+
+export interface Guild {
+  id: string;
+  name: string;
+  icon?: string;
+  approximate_member_count?: number;
+  owner_id?: string;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE}${path}`;
   const res = await fetch(url, {
@@ -145,4 +168,12 @@ export const api = {
     request<{ queued: boolean; message: string }>(`/v1/apps/${appId}/commands/deploy`, {
       method: "POST",
     }),
+
+  // Telemetry & Logs
+  listLogs: (appId: string, limit?: number, offset?: number) =>
+    request<Log[]>(`/v1/apps/${appId}/logs?limit=${limit || 50}&offset=${offset || 0}`),
+  getGatewayStatus: (appId: string) =>
+    request<GatewayStatus>(`/v1/apps/${appId}/gateway`),
+  listGuilds: (appId: string) =>
+    request<Guild[]>(`/v1/apps/${appId}/guilds`),
 };

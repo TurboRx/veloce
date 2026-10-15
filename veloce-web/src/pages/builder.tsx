@@ -13,6 +13,8 @@ import {
   ChevronDown,
   Loader2,
   RefreshCw,
+  Activity,
+  Server,
 } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -27,7 +29,9 @@ import { toast } from "sonner";
 import { FlowCanvas } from "@/components/flow/FlowCanvas";
 import { BlockPalette } from "@/components/flow/BlockPalette";
 import { BlockInspector } from "@/components/flow/BlockInspector";
-import { api, App, Command, FlowNodeType, FlowNodeData, FlowData } from "@/lib/api";
+import { ExecutionLogsModal } from "@/components/telemetry/ExecutionLogsModal";
+import { GuildsModal } from "@/components/telemetry/GuildsModal";
+import { api, App, Command, FlowNodeType, FlowNodeData, FlowData, GatewayStatus } from "@/lib/api";
 
 const defaultInitialNodes: Node[] = [
   {
@@ -75,9 +79,19 @@ export default function BuilderPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [newCmdName, setNewCmdName] = useState("");
   const [newCmdDesc, setNewCmdDesc] = useState("");
+  const [logsModalOpen, setLogsModalOpen] = useState(false);
+  const [guildsModalOpen, setGuildsModalOpen] = useState(false);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>(defaultInitialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(defaultInitialEdges);
+
+  // Gateway status query
+  const { data: gatewayStatus } = useQuery<GatewayStatus | null>({
+    queryKey: ["app-gateway-status", selectedAppId],
+    queryFn: () => (selectedAppId ? api.getGatewayStatus(selectedAppId) : Promise.resolve(null)),
+    enabled: !!selectedAppId,
+    refetchInterval: 10000,
+  });
 
   // 1. Fetch apps
   const { data: apps, isLoading: appsLoading } = useQuery<App[]>({
@@ -511,6 +525,45 @@ export default function BuilderPage() {
 
           {/* Action Buttons */}
           <div className="flex items-center gap-2">
+            {/* Gateway Status Badge */}
+            {selectedAppId && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-950 border border-slate-800 text-[11px] font-medium mr-1">
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    gatewayStatus?.connected ? "bg-emerald-400 animate-pulse" : "bg-slate-500"
+                  }`}
+                />
+                <span className={gatewayStatus?.connected ? "text-emerald-300" : "text-slate-400"}>
+                  {gatewayStatus?.connected ? "Online" : "Offline"}
+                </span>
+              </div>
+            )}
+
+            <button
+              onClick={() => setGuildsModalOpen(true)}
+              disabled={!selectedAppId}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 disabled:opacity-50 transition shadow-sm"
+              title="View connected Discord servers"
+            >
+              <Server className="w-3.5 h-3.5 text-emerald-400" />
+              Servers
+              {gatewayStatus?.guild_count !== undefined && gatewayStatus.guild_count > 0 && (
+                <span className="bg-slate-900 text-emerald-400 px-1.5 py-0.2 rounded text-[10px] font-mono border border-slate-800">
+                  {gatewayStatus.guild_count}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => setLogsModalOpen(true)}
+              disabled={!selectedAppId}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 disabled:opacity-50 transition shadow-sm"
+              title="View live execution logs"
+            >
+              <Activity className="w-3.5 h-3.5 text-indigo-400" />
+              Logs
+            </button>
+
             <button
               onClick={() => saveMutation.mutate()}
               disabled={saveMutation.isPending || !selectedCmdId}
@@ -630,6 +683,18 @@ export default function BuilderPage() {
             </div>
           </div>
         )}
+
+        {/* Modals */}
+        <ExecutionLogsModal
+          appId={selectedAppId}
+          isOpen={logsModalOpen}
+          onClose={() => setLogsModalOpen(false)}
+        />
+        <GuildsModal
+          appId={selectedAppId}
+          isOpen={guildsModalOpen}
+          onClose={() => setGuildsModalOpen(false)}
+        />
       </div>
     </>
   );
