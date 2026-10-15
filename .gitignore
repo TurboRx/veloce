@@ -1,0 +1,38 @@
+# Environment and secrets
+.env
+.env*.local
+*.pem
+*.key
+veloce.toml
+
+# Go
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work.sum
+
+# Node / Next.js
+node_modules/
+.pnpm-store/
+.next/
+out/
+build/
+.turbo/
+
+# Logs and databases
+*.log
+data/
+.cache/
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
