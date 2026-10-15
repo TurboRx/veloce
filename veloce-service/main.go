@@ -20,6 +20,7 @@ func main() {
 		Version: "0.1.0",
 		Commands: []*cli.Command{
 			cmd.ServerCmd(),
+			cmd.DatabaseCmd(),
 		},
 	}
 
