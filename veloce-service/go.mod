@@ -3,7 +3,7 @@ module github.com/TurboRx/veloce/veloce-service
 go 1.26.0
 
 require (
-	github.com/diamondburned/arikawa/v3 v3.4.0
+	github.com/diamondburned/arikawa/v3 v3.6.0
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/gorilla/mux v1.8.1
 	github.com/knadh/koanf/parsers/toml v0.1.0
