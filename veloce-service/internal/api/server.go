@@ -8,22 +8,31 @@ import (
 	"time"
 
 	"github.com/TurboRx/veloce/veloce-service/internal/config"
+	"github.com/TurboRx/veloce/veloce-service/internal/store"
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 )
 
 type Server struct {
-	config *config.Config
-	router *mux.Router
-	http   *http.Server
+	config       *config.Config
+	router       *mux.Router
+	http         *http.Server
+	userStore    store.UserStore
+	sessionStore store.SessionStore
 }
 
-func NewServer(cfg *config.Config) *Server {
+func NewServer(cfg *config.Config, userStore store.UserStore, sessionStore store.SessionStore) *Server {
 	r := mux.NewRouter()
 
 	s := &Server{
-		config: cfg,
-		router: r,
+		config:       cfg,
+		router:       r,
+		userStore:    userStore,
+		sessionStore: sessionStore,
+	}
+
+	if sessionStore != nil {
+		r.Use(AuthMiddleware(sessionStore))
 	}
 
 	s.registerRoutes(r)
