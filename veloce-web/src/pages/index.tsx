@@ -1,6 +1,6 @@
 import Head from "next/head";
 import Link from "next/link";
-import { Zap, Bot, ArrowRight, ShieldCheck, Cpu, Layers } from "lucide-react";
+import { Zap, Bot, ArrowRight, ShieldCheck, Cpu, Layers, LogIn, LogOut, User as UserIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 interface HealthData {
@@ -9,8 +9,17 @@ interface HealthData {
   timestamp: string;
 }
 
+interface UserData {
+  id: string;
+  email: string;
+  display_name: string;
+  discord_id: string;
+  discord_username: string;
+  discord_avatar?: string;
+}
+
 export default function Home() {
-  const { data: health, isLoading } = useQuery<HealthData>({
+  const { data: health, isLoading: healthLoading } = useQuery<HealthData>({
     queryKey: ["service-health"],
     queryFn: async () => {
       try {
@@ -23,6 +32,34 @@ export default function Home() {
     },
     refetchInterval: 15000,
   });
+
+  const { data: user, refetch: refetchUser } = useQuery<UserData | null>({
+    queryKey: ["current-user"],
+    queryFn: async () => {
+      try {
+        const res = await fetch("http://localhost:8080/v1/user/@me", {
+          credentials: "include",
+        });
+        if (!res.ok) return null;
+        return res.json();
+      } catch {
+        return null;
+      }
+    },
+    retry: false,
+  });
+
+  const handleLogout = async () => {
+    try {
+      await fetch("http://localhost:8080/v1/auth/logout", {
+        method: "POST",
+        credentials: "include",
+      });
+      await refetchUser();
+    } catch {
+      // Ignored
+    }
+  };
 
   return (
     <>
@@ -45,10 +82,41 @@ export default function Home() {
 
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-full bg-slate-900 border border-slate-800">
-              <span className={`w-2 h-2 rounded-full ${isLoading ? "bg-amber-400 animate-pulse" : "bg-emerald-400"}`} />
+              <span className={`w-2 h-2 rounded-full ${healthLoading ? "bg-amber-400 animate-pulse" : "bg-emerald-400"}`} />
               <span className="text-slate-400">Backend:</span>
               <span className="text-slate-200">{health?.status || "Connecting..."}</span>
             </div>
+
+            {user ? (
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
+                  {user.discord_avatar ? (
+                    <img
+                      src={`https://cdn.discordapp.com/avatars/${user.discord_id}/${user.discord_avatar}.png?size=32`}
+                      alt={user.display_name}
+                      className="w-5 h-5 rounded-full"
+                    />
+                  ) : (
+                    <UserIcon className="w-4 h-4 text-slate-400" />
+                  )}
+                  <span className="font-medium text-slate-200">{user.display_name}</span>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-900 transition"
+                  title="Log out"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
+            ) : (
+              <a
+                href="http://localhost:8080/v1/auth/login"
+                className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#5865F2] hover:bg-[#4752C4] text-white transition shadow"
+              >
+                <LogIn className="w-3.5 h-3.5" /> Sign in with Discord
+              </a>
+            )}
 
             <Link
               href="/builder"

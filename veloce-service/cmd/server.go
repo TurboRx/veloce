@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/TurboRx/veloce/veloce-service/internal/api"
 	"github.com/TurboRx/veloce/veloce-service/internal/config"
+	"github.com/TurboRx/veloce/veloce-service/internal/db/postgres"
 	"github.com/urfave/cli/v2"
 )
 
@@ -31,7 +33,23 @@ func ServerCmd() *cli.Command {
 				return err
 			}
 
-			server := api.NewServer(cfg)
+			// Initialize Database client
+			dbClient, err := postgres.New(cfg.Database.DSN(), 25)
+			if err != nil {
+				slog.Warn("Failed to establish database connection, running in degraded mode", slog.String("error", err.Error()))
+			} else {
+				defer dbClient.Close()
+				slog.Info("PostgreSQL connection initialized successfully")
+			}
+
+			var userStore *postgres.PostgresUserStore
+			var sessionStore *postgres.PostgresSessionStore
+			if dbClient != nil && dbClient.DB != nil {
+				userStore = postgres.NewUserStore(dbClient.DB)
+				sessionStore = postgres.NewSessionStore(dbClient.DB)
+			}
+
+			server := api.NewServer(cfg, userStore, sessionStore)
 
 			errChan := make(chan error, 1)
 			go func() {
@@ -46,7 +64,10 @@ func ServerCmd() *cli.Command {
 				slog.Info("Received signal, exiting gracefully", slog.String("signal", sig.String()))
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				return server.Shutdown(ctx)
+				if err := server.Shutdown(ctx); err != nil {
+					return fmt.Errorf("server shutdown error: %w", err)
+				}
+				return nil
 			case err := <-errChan:
 				return err
 			}

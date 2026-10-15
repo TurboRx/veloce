@@ -18,6 +18,14 @@ func (s *Server) registerRoutes(r *mux.Router) {
 	apiV1 := r.PathPrefix("/v1").Subrouter()
 
 	apiV1.HandleFunc("/health", s.handleHealth).Methods(http.MethodGet)
+
+	// Authentication routes
+	apiV1.HandleFunc("/auth/login", s.handleAuthLogin).Methods(http.MethodGet)
+	apiV1.HandleFunc("/auth/callback", s.handleAuthCallback).Methods(http.MethodGet)
+	apiV1.HandleFunc("/auth/logout", s.handleAuthLogout).Methods(http.MethodGet, http.MethodPost)
+
+	// User profile route (requires active session)
+	apiV1.HandleFunc("/user/@me", RequireAuth(s.handleCurrentUser)).Methods(http.MethodGet)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
