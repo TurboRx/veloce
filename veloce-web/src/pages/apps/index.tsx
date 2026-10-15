@@ -5,15 +5,7 @@ import { Zap, Bot, Plus, Trash2, ArrowRight, ExternalLink, ShieldCheck, Key } fr
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-interface AppItem {
-  id: string;
-  name: string;
-  description?: string;
-  enabled: boolean;
-  discord_id: string;
-  discord_avatar?: string;
-  created_at: string;
-}
+import { api, App } from "@/lib/api";
 
 export default function AppsPage() {
   const queryClient = useQueryClient();
@@ -21,38 +13,18 @@ export default function AppsPage() {
   const [token, setToken] = useState("");
   const [customName, setCustomName] = useState("");
 
-  const { data: apps, isLoading } = useQuery<AppItem[]>({
+  const { data: apps, isLoading } = useQuery<App[]>({
     queryKey: ["apps-list"],
-    queryFn: async () => {
-      const res = await fetch("http://localhost:8080/v1/apps", {
-        credentials: "include",
-      });
-      if (!res.ok) {
-        if (res.status === 401) throw new Error("Unauthorized");
-        throw new Error("Failed to load apps");
-      }
-      return res.json();
-    },
+    queryFn: () => api.listApps(),
     retry: false,
   });
 
   const createAppMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch("http://localhost:8080/v1/apps", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          token: token.trim(),
-          name: customName.trim() ? customName.trim() : undefined,
-        }),
+      return api.createApp({
+        token: token.trim(),
+        name: customName.trim() ? customName.trim() : undefined,
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.message || "Failed to register bot application");
-      }
-      return data;
     },
     onSuccess: () => {
       toast.success("Bot connected successfully!");
@@ -68,12 +40,7 @@ export default function AppsPage() {
 
   const deleteAppMutation = useMutation({
     mutationFn: async (id: string) => {
-      const res = await fetch(`http://localhost:8080/v1/apps/${id}`, {
-        method: "DELETE",
-        credentials: "include",
-      });
-      if (!res.ok) throw new Error("Failed to delete bot");
-      return id;
+      return api.deleteApp(id);
     },
     onSuccess: () => {
       toast.success("Bot deleted successfully");

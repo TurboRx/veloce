@@ -1,135 +1,635 @@
 import Head from "next/head";
 import Link from "next/link";
-import { ArrowLeft, Save, Play, Plus, Terminal, Send, GitFork, Sliders } from "lucide-react";
-import { FlowCanvas } from "@/components/flow/FlowCanvas";
+import { useRouter } from "next/router";
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import {
+  ArrowLeft,
+  Save,
+  Play,
+  Plus,
+  Terminal,
+  Bot,
+  Trash2,
+  ChevronDown,
+  Loader2,
+  RefreshCw,
+} from "lucide-react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useNodesState,
+  useEdgesState,
+  addEdge,
+  Connection,
+  Edge,
+  Node,
+} from "@xyflow/react";
 import { toast } from "sonner";
+import { FlowCanvas } from "@/components/flow/FlowCanvas";
+import { BlockPalette } from "@/components/flow/BlockPalette";
+import { BlockInspector } from "@/components/flow/BlockInspector";
+import { api, App, Command, FlowNodeType, FlowNodeData, FlowData } from "@/lib/api";
+
+const defaultInitialNodes: Node[] = [
+  {
+    id: "node_entry_1",
+    type: "entry_command",
+    data: {
+      data: {
+        name: "ping",
+        description: "Replies with pong and server latency.",
+      },
+    },
+    position: { x: 250, y: 100 },
+  },
+  {
+    id: "node_reply_1",
+    type: "action_response_create",
+    data: {
+      data: {
+        response_content: "Pong! 🏓 Hello {user.username}!",
+        response_ephemeral: true,
+      },
+    },
+    position: { x: 250, y: 280 },
+  },
+];
+
+const defaultInitialEdges: Edge[] = [
+  {
+    id: "edge_1",
+    source: "node_entry_1",
+    target: "node_reply_1",
+    sourceHandle: "default",
+    style: { stroke: "#10b981", strokeWidth: 2 },
+  },
+];
 
 export default function BuilderPage() {
-  const handleSave = () => {
-    toast.success("Flow saved successfully!");
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const { app: queryAppId, cmd: queryCmdId } = router.query;
+
+  const [selectedAppId, setSelectedAppId] = useState<string>("");
+  const [selectedCmdId, setSelectedCmdId] = useState<string>("");
+  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [newCmdName, setNewCmdName] = useState("");
+  const [newCmdDesc, setNewCmdDesc] = useState("");
+
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>(defaultInitialNodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(defaultInitialEdges);
+
+  // 1. Fetch apps
+  const { data: apps, isLoading: appsLoading } = useQuery<App[]>({
+    queryKey: ["apps-list"],
+    queryFn: () => api.listApps(),
+  });
+
+  // Automatically select app from query or first available
+  useEffect(() => {
+    if (apps && apps.length > 0) {
+      if (queryAppId && typeof queryAppId === "string" && apps.some((a) => a.id === queryAppId)) {
+        setSelectedAppId(queryAppId);
+      } else if (!selectedAppId) {
+        setSelectedAppId(apps[0].id);
+      }
+    }
+  }, [apps, queryAppId]);
+
+  // 2. Fetch commands for selected app
+  const {
+    data: commands,
+    isLoading: commandsLoading,
+    refetch: refetchCommands,
+  } = useQuery<Command[]>({
+    queryKey: ["commands-list", selectedAppId],
+    queryFn: () => (selectedAppId ? api.listCommands(selectedAppId) : Promise.resolve([])),
+    enabled: !!selectedAppId,
+  });
+
+  // Select command
+  useEffect(() => {
+    if (commands && commands.length > 0) {
+      if (queryCmdId && typeof queryCmdId === "string" && commands.some((c) => c.id === queryCmdId)) {
+        setSelectedCmdId(queryCmdId);
+      } else if (!commands.some((c) => c.id === selectedCmdId)) {
+        setSelectedCmdId(commands[0].id);
+      }
+    } else {
+      setSelectedCmdId("");
+    }
+  }, [commands, queryCmdId]);
+
+  // Active command object
+  const activeCommand = commands?.find((c) => c.id === selectedCmdId);
+  const activeApp = apps?.find((a) => a.id === selectedAppId);
+
+  // Load flow data when activeCommand changes
+  useEffect(() => {
+    if (activeCommand && activeCommand.flow_source?.nodes?.length > 0) {
+      const formattedNodes: Node[] = activeCommand.flow_source.nodes.map((n) => ({
+        id: n.id,
+        type: n.type,
+        position: n.position || { x: 200, y: 200 },
+        data: { data: n.data },
+      }));
+
+      const formattedEdges: Edge[] = (activeCommand.flow_source.edges || []).map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        sourceHandle: e.sourceHandle || "default",
+        targetHandle: e.targetHandle || "default",
+        label: e.sourceHandle === "true" ? "True" : e.sourceHandle === "false" ? "False" : undefined,
+        style: {
+          stroke:
+            e.sourceHandle === "true"
+              ? "#10b981"
+              : e.sourceHandle === "false"
+              ? "#f43f5e"
+              : "#6366f1",
+          strokeWidth: 2,
+        },
+      }));
+
+      setNodes(formattedNodes);
+      setEdges(formattedEdges);
+      setSelectedNode(null);
+    }
+  }, [selectedCmdId]);
+
+  // Edge connection handler
+  const onConnect = useCallback(
+    (connection: Connection) => {
+      const isTrue = connection.sourceHandle === "true";
+      const isFalse = connection.sourceHandle === "false";
+      const edgeStyle = {
+        stroke: isTrue ? "#10b981" : isFalse ? "#f43f5e" : "#6366f1",
+        strokeWidth: 2,
+      };
+
+      setEdges((eds) =>
+        addEdge(
+          {
+            ...connection,
+            label: isTrue ? "True" : isFalse ? "False" : undefined,
+            style: edgeStyle,
+          },
+          eds
+        )
+      );
+    },
+    [setEdges]
+  );
+
+  // Node selection handler
+  const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
+    setSelectedNode(node as Node<{ data: FlowNodeData }>);
+  }, []);
+
+  const onPaneClick = useCallback(() => {
+    setSelectedNode(null);
+  }, []);
+
+  // Update selected node data
+  const handleUpdateNodeData = (nodeId: string, newData: Partial<FlowNodeData>) => {
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (n.id === nodeId) {
+          const prevData = ((n.data as any)?.data || {}) as FlowNodeData;
+          const updated = {
+            ...n,
+            data: {
+              ...(n.data as any),
+              data: {
+                ...prevData,
+                ...newData,
+              },
+            },
+          };
+          if (selectedNode?.id === nodeId) {
+            setSelectedNode(updated);
+          }
+          return updated;
+        }
+        return n;
+      })
+    );
   };
 
-  const handleDeploy = () => {
-    toast.info("Queued slash command deployment to Discord.");
+  // Delete node
+  const handleDeleteNode = (nodeId: string) => {
+    setNodes((nds) => nds.filter((n) => n.id !== nodeId));
+    setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
+    if (selectedNode?.id === nodeId) {
+      setSelectedNode(null);
+    }
   };
+
+  // Add node from palette
+  const handleAddNode = (type: FlowNodeType) => {
+    const id = `node_${type}_${Date.now()}`;
+    const newNode: Node = {
+      id,
+      type,
+      position: { x: 300 + Math.random() * 50, y: 200 + Math.random() * 50 },
+      data: {
+        data: {
+          name: type === "entry_command" ? "custom" : undefined,
+          description: type === "entry_command" ? "A custom slash command" : undefined,
+          response_content: type === "action_response_create" ? "Response message" : undefined,
+          condition_expression: type === "control_branch" ? "true" : undefined,
+          delay_seconds: type === "control_delay" ? 2 : undefined,
+          variable_name: type === "action_variable_set" ? "my_var" : undefined,
+          variable_value: type === "action_variable_set" ? "value" : undefined,
+        },
+      },
+    };
+
+    setNodes((nds) => [...nds, newNode]);
+    setSelectedNode(newNode);
+  };
+
+  // Drag and drop onto canvas
+  const onDragOver = useCallback((event: React.DragEvent) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }, []);
+
+  const onDrop = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault();
+      const type = event.dataTransfer.getData("application/reactflow") as FlowNodeType;
+      if (!type) return;
+
+      const rect = event.currentTarget.getBoundingClientRect();
+      const position = {
+        x: event.clientX - rect.left - 100,
+        y: event.clientY - rect.top - 50,
+      };
+
+      const id = `node_${type}_${Date.now()}`;
+      const newNode: Node = {
+        id,
+        type,
+        position,
+        data: {
+          data: {
+            name: type === "entry_command" ? "custom" : undefined,
+            description: type === "entry_command" ? "A custom slash command" : undefined,
+            response_content: type === "action_response_create" ? "Response message" : undefined,
+            condition_expression: type === "control_branch" ? "true" : undefined,
+            delay_seconds: type === "control_delay" ? 2 : undefined,
+            variable_name: type === "action_variable_set" ? "my_var" : undefined,
+            variable_value: type === "action_variable_set" ? "value" : undefined,
+          },
+        },
+      };
+
+      setNodes((nds) => [...nds, newNode]);
+      setSelectedNode(newNode);
+    },
+    [setNodes]
+  );
+
+  // 3. Save Mutation
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedAppId || !selectedCmdId) {
+        throw new Error("No active command selected to save");
+      }
+
+      const flowSource: FlowData = {
+        nodes: nodes.map((n) => ({
+          id: n.id,
+          type: n.type as FlowNodeType,
+          data: ((n.data as any)?.data || {}) as FlowNodeData,
+          position: n.position,
+        })),
+        edges: edges.map((e) => ({
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          sourceHandle: e.sourceHandle || undefined,
+          targetHandle: e.targetHandle || undefined,
+        })),
+      };
+
+      // Extract command name & description from entry node
+      const entry = nodes.find((n) => n.type === "entry_command");
+      const entryData = (entry?.data as any)?.data as FlowNodeData | undefined;
+      const name = entryData?.name || activeCommand?.name || "command";
+      const description = entryData?.description || activeCommand?.description || "";
+
+      return api.updateCommand(selectedAppId, selectedCmdId, {
+        name,
+        description,
+        flow_source: flowSource,
+      });
+    },
+    onSuccess: () => {
+      toast.success("Flow saved successfully!");
+      queryClient.invalidateQueries({ queryKey: ["commands-list", selectedAppId] });
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Failed to save flow");
+    },
+  });
+
+  // 4. Deploy Mutation
+  const deployMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedAppId) throw new Error("No app selected");
+      return api.deployCommands(selectedAppId);
+    },
+    onSuccess: (data) => {
+      toast.success(data.message || "Commands queued for Discord deployment!");
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Failed to deploy commands");
+    },
+  });
+
+  // 5. Create Command Mutation
+  const createCmdMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedAppId) throw new Error("Select an application first");
+      const cleanName = newCmdName.toLowerCase().replace(/[^a-z0-9_-]/g, "");
+      if (!cleanName) throw new Error("Valid command name is required");
+
+      const initialSource: FlowData = {
+        nodes: [
+          {
+            id: `node_entry_${Date.now()}`,
+            type: "entry_command",
+            data: {
+              name: cleanName,
+              description: newCmdDesc || "Slash command created in Veloce",
+            },
+            position: { x: 250, y: 100 },
+          },
+          {
+            id: `node_reply_${Date.now() + 1}`,
+            type: "action_response_create",
+            data: {
+              response_content: `Hello from /${cleanName}!`,
+              response_ephemeral: false,
+            },
+            position: { x: 250, y: 280 },
+          },
+        ],
+        edges: [
+          {
+            id: `edge_${Date.now()}`,
+            source: `node_entry_${Date.now()}`,
+            target: `node_reply_${Date.now() + 1}`,
+            sourceHandle: "default",
+          },
+        ],
+      };
+
+      return api.createCommand(selectedAppId, {
+        name: cleanName,
+        description: newCmdDesc || "Custom slash command",
+        flow_source: initialSource,
+      });
+    },
+    onSuccess: (newCmd) => {
+      toast.success(`Command /${newCmd.name} created!`);
+      setNewCmdName("");
+      setNewCmdDesc("");
+      setCreateModalOpen(false);
+      queryClient.invalidateQueries({ queryKey: ["commands-list", selectedAppId] });
+      setSelectedCmdId(newCmd.id);
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Failed to create command");
+    },
+  });
+
+  // 6. Delete Command Mutation
+  const deleteCmdMutation = useMutation({
+    mutationFn: async (cmdId: string) => {
+      return api.deleteCommand(selectedAppId, cmdId);
+    },
+    onSuccess: () => {
+      toast.success("Command deleted");
+      queryClient.invalidateQueries({ queryKey: ["commands-list", selectedAppId] });
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Failed to delete command");
+    },
+  });
 
   return (
     <>
       <Head>
-        <title>Flow Builder - Veloce</title>
+        <title>
+          {activeCommand ? `/${activeCommand.name} - Flow Builder` : "Flow Builder - Veloce"}
+        </title>
       </Head>
 
       <div className="h-screen w-screen flex flex-col bg-slate-950 text-slate-100 overflow-hidden">
         {/* Top Navbar */}
-        <header className="h-14 border-b border-slate-800 px-4 flex items-center justify-between bg-slate-900/90 z-20">
+        <header className="h-14 border-b border-slate-800 px-4 flex items-center justify-between bg-slate-900/95 z-20">
           <div className="flex items-center gap-3">
             <Link
-              href="/"
+              href="/apps"
               className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-100 transition"
-              title="Back to Dashboard"
+              title="Back to Applications"
             >
               <ArrowLeft className="w-5 h-5" />
             </Link>
             <div className="h-4 w-px bg-slate-800" />
-            <div>
-              <h1 className="text-sm font-semibold text-slate-200">/ping (Slash Command)</h1>
-              <p className="text-[11px] text-slate-400">Flow ID: cmd_ping_main</p>
+
+            {/* Bot App Selector */}
+            <div className="flex items-center gap-2">
+              <Bot className="w-4 h-4 text-indigo-400" />
+              <select
+                value={selectedAppId}
+                onChange={(e) => setSelectedAppId(e.target.value)}
+                className="bg-slate-950 border border-slate-800 text-xs font-semibold rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none focus:border-indigo-500"
+              >
+                {appsLoading ? (
+                  <option>Loading apps...</option>
+                ) : !apps || apps.length === 0 ? (
+                  <option value="">No apps found</option>
+                ) : (
+                  apps.map((app) => (
+                    <option key={app.id} value={app.id}>
+                      {app.name}
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+
+            <div className="h-4 w-px bg-slate-800" />
+
+            {/* Command Selector */}
+            <div className="flex items-center gap-2">
+              <Terminal className="w-4 h-4 text-emerald-400" />
+              <select
+                value={selectedCmdId}
+                onChange={(e) => setSelectedCmdId(e.target.value)}
+                disabled={!commands || commands.length === 0}
+                className="bg-slate-950 border border-slate-800 text-xs font-mono font-medium rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+              >
+                {commandsLoading ? (
+                  <option>Loading commands...</option>
+                ) : !commands || commands.length === 0 ? (
+                  <option value="">No commands (Click + New)</option>
+                ) : (
+                  commands.map((cmd) => (
+                    <option key={cmd.id} value={cmd.id}>
+                      /{cmd.name}
+                    </option>
+                  ))
+                )}
+              </select>
+
+              <button
+                onClick={() => setCreateModalOpen(true)}
+                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
+                title="Create New Command"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+
+              {activeCommand && (
+                <button
+                  onClick={() => deleteCmdMutation.mutate(activeCommand.id)}
+                  disabled={deleteCmdMutation.isPending}
+                  className="p-1.5 rounded-lg hover:bg-rose-500/10 text-slate-400 hover:text-rose-400 border border-transparent hover:border-rose-500/30 transition"
+                  title="Delete this command"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
           </div>
 
+          {/* Action Buttons */}
           <div className="flex items-center gap-2">
             <button
-              onClick={handleSave}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
+              onClick={() => saveMutation.mutate()}
+              disabled={saveMutation.isPending || !selectedCmdId}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 disabled:opacity-50 transition shadow-sm"
             >
-              <Save className="w-3.5 h-3.5" /> Save Flow
+              {saveMutation.isPending ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Save className="w-3.5 h-3.5" />
+              )}
+              Save Flow
             </button>
             <button
-              onClick={handleDeploy}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow transition"
+              onClick={() => deployMutation.mutate()}
+              disabled={deployMutation.isPending || !selectedAppId}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow transition disabled:opacity-50"
             >
-              <Play className="w-3.5 h-3.5 fill-current" /> Deploy Command
+              {deployMutation.isPending ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Play className="w-3.5 h-3.5 fill-current" />
+              )}
+              Deploy to Discord
             </button>
           </div>
         </header>
 
         {/* Workspace Layout */}
         <div className="flex-1 flex overflow-hidden">
-          {/* Left Block Explorer */}
-          <aside className="w-64 border-r border-slate-800 bg-slate-900/50 p-4 flex flex-col gap-4 overflow-y-auto hidden md:flex">
-            <div className="flex items-center justify-between text-xs font-semibold text-slate-400 tracking-wider">
-              <span>BLOCK PALETTE</span>
-              <Plus className="w-4 h-4 cursor-pointer hover:text-white" />
-            </div>
+          {/* Left Block Palette */}
+          <BlockPalette onAddNode={handleAddNode} />
 
-            <div className="space-y-2">
-              <div className="text-[11px] font-semibold text-emerald-400 uppercase tracking-wider mt-2">Entry Triggers</div>
-              <div className="p-2.5 rounded-lg bg-slate-900/90 border border-emerald-500/30 hover:border-emerald-500 text-xs flex items-center gap-2 cursor-grab transition">
-                <Terminal className="w-4 h-4 text-emerald-400" />
-                <div>
-                  <div className="font-medium text-slate-200">Slash Command</div>
-                  <div className="text-[10px] text-slate-400">Listens for /command</div>
-                </div>
-              </div>
-
-              <div className="text-[11px] font-semibold text-indigo-400 uppercase tracking-wider mt-4">Logic & Control</div>
-              <div className="p-2.5 rounded-lg bg-slate-900/90 border border-indigo-500/30 hover:border-indigo-500 text-xs flex items-center gap-2 cursor-grab transition">
-                <GitFork className="w-4 h-4 text-indigo-400" />
-                <div>
-                  <div className="font-medium text-slate-200">Condition Check</div>
-                  <div className="text-[10px] text-slate-400">Branch True / False</div>
-                </div>
-              </div>
-
-              <div className="text-[11px] font-semibold text-cyan-400 uppercase tracking-wider mt-4">Discord Actions</div>
-              <div className="p-2.5 rounded-lg bg-slate-900/90 border border-cyan-500/30 hover:border-cyan-500 text-xs flex items-center gap-2 cursor-grab transition">
-                <Send className="w-4 h-4 text-cyan-400" />
-                <div>
-                  <div className="font-medium text-slate-200">Send Message</div>
-                  <div className="text-[10px] text-slate-400">Send text or embed</div>
-                </div>
-              </div>
-            </div>
-          </aside>
-
-          {/* Flow Visual Canvas */}
-          <main className="flex-1 p-3 bg-slate-950">
-            <FlowCanvas />
+          {/* Center Flow Canvas */}
+          <main className="flex-1 p-3 bg-slate-950 relative">
+            <FlowCanvas
+              nodes={nodes}
+              edges={edges}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={onConnect}
+              onNodeClick={onNodeClick}
+              onPaneClick={onPaneClick}
+              onDrop={onDrop}
+              onDragOver={onDragOver}
+            />
           </main>
 
           {/* Right Inspector Panel */}
-          <aside className="w-72 border-l border-slate-800 bg-slate-900/50 p-4 flex flex-col gap-4 overflow-y-auto hidden lg:flex">
-            <div className="flex items-center gap-2 text-xs font-semibold text-slate-400 tracking-wider">
-              <Sliders className="w-4 h-4" />
-              <span>BLOCK INSPECTOR</span>
-            </div>
+          <BlockInspector
+            selectedNode={selectedNode}
+            onUpdateNodeData={handleUpdateNodeData}
+            onDeleteNode={handleDeleteNode}
+          />
+        </div>
 
-            <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-4 text-xs space-y-3">
-              <div>
-                <label className="text-slate-400 block mb-1">Selected Node</label>
-                <div className="font-medium text-slate-200">Slash Command (/ping)</div>
+        {/* Create Command Modal */}
+        {createModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
+            <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl relative">
+              <div className="flex items-center gap-2 text-emerald-400 mb-2">
+                <Terminal className="w-5 h-5" />
+                <h3 className="text-lg font-bold text-slate-100">Create Slash Command</h3>
               </div>
+              <p className="text-xs text-slate-400 mb-6">
+                Add a new Discord slash command to this application and design its visual execution graph.
+              </p>
 
-              <div>
-                <label className="text-slate-400 block mb-1">Command Description</label>
-                <input
-                  type="text"
-                  readOnly
-                  value="Replies with pong and server latency."
-                  className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-300 text-xs focus:outline-none"
-                />
-              </div>
+              <div className="space-y-4 text-xs">
+                <div>
+                  <label className="text-slate-300 font-medium block mb-1.5">
+                    Command Name <span className="text-rose-400">*</span>
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-2 text-slate-500 font-mono">/</span>
+                    <input
+                      type="text"
+                      placeholder="ban, info, rank, etc."
+                      value={newCmdName}
+                      onChange={(e) =>
+                        setNewCmdName(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))
+                      }
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-6 pr-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-emerald-500 font-mono"
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-1">Lowercase letters, numbers, and dashes.</p>
+                </div>
 
-              <div>
-                <label className="text-slate-400 block mb-1">Ephemeral Response</label>
-                <div className="flex items-center gap-2 text-emerald-400 text-xs">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                  Enabled (Only caller sees response)
+                <div>
+                  <label className="text-slate-300 font-medium block mb-1.5">Description</label>
+                  <input
+                    type="text"
+                    placeholder="Brief description shown to Discord users"
+                    value={newCmdDesc}
+                    onChange={(e) => setNewCmdDesc(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                  />
                 </div>
               </div>
+
+              <div className="mt-8 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setCreateModalOpen(false)}
+                  className="px-4 py-2 text-xs font-medium rounded-lg text-slate-400 hover:text-slate-200 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!newCmdName.trim() || createCmdMutation.isPending}
+                  onClick={() => createCmdMutation.mutate()}
+                  className="px-4 py-2 text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white shadow transition flex items-center gap-1.5"
+                >
+                  {createCmdMutation.isPending ? "Creating..." : "Create Command"}
+                </button>
+              </div>
             </div>
-          </aside>
-        </div>
+          </div>
+        )}
       </div>
     </>
   );

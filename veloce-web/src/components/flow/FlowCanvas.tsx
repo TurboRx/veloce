@@ -1,112 +1,76 @@
-import React, { useCallback } from "react";
+import React, { useMemo } from "react";
 import {
   ReactFlow,
   MiniMap,
   Controls,
   Background,
-  useNodesState,
-  useEdgesState,
-  addEdge,
+  BackgroundVariant,
   Connection,
   Edge,
   Node,
-  BackgroundVariant,
+  OnNodesChange,
+  OnEdgesChange,
+  NodeTypes,
 } from "@xyflow/react";
-import { Terminal, Send, GitFork } from "lucide-react";
+import {
+  EntryCommandNode,
+  ActionResponseCreateNode,
+  ActionMessageCreateNode,
+  ControlBranchNode,
+  ControlDelayNode,
+  ActionVariableSetNode,
+} from "./nodes/CustomNodes";
 
-const initialNodes: Node[] = [
-  {
-    id: "1",
-    type: "input",
-    data: {
-      label: (
-        <div className="flex items-center gap-2 p-1">
-          <Terminal className="w-4 h-4 text-emerald-400" />
-          <div>
-            <div className="font-semibold text-xs text-emerald-400">COMMAND ENTRY</div>
-            <div className="text-sm">/ping</div>
-          </div>
-        </div>
-      ),
-    },
-    position: { x: 100, y: 150 },
-    className: "bg-slate-900 border-2 border-emerald-500/50 text-white rounded-lg p-2 shadow-lg min-w-[180px]",
-  },
-  {
-    id: "2",
-    data: {
-      label: (
-        <div className="flex items-center gap-2 p-1">
-          <GitFork className="w-4 h-4 text-indigo-400" />
-          <div>
-            <div className="font-semibold text-xs text-indigo-400">CONDITION</div>
-            <div className="text-sm">Has Role: Admin</div>
-          </div>
-        </div>
-      ),
-    },
-    position: { x: 360, y: 150 },
-    className: "bg-slate-900 border-2 border-indigo-500/50 text-white rounded-lg p-2 shadow-lg min-w-[180px]",
-  },
-  {
-    id: "3",
-    type: "output",
-    data: {
-      label: (
-        <div className="flex items-center gap-2 p-1">
-          <Send className="w-4 h-4 text-cyan-400" />
-          <div>
-            <div className="font-semibold text-xs text-cyan-400">ACTION</div>
-            <div className="text-sm">Send Pong (Secret)</div>
-          </div>
-        </div>
-      ),
-    },
-    position: { x: 640, y: 90 },
-    className: "bg-slate-900 border-2 border-cyan-500/50 text-white rounded-lg p-2 shadow-lg min-w-[200px]",
-  },
-  {
-    id: "4",
-    type: "output",
-    data: {
-      label: (
-        <div className="flex items-center gap-2 p-1">
-          <Send className="w-4 h-4 text-rose-400" />
-          <div>
-            <div className="font-semibold text-xs text-rose-400">ACTION</div>
-            <div className="text-sm">Send Permission Error</div>
-          </div>
-        </div>
-      ),
-    },
-    position: { x: 640, y: 220 },
-    className: "bg-slate-900 border-2 border-rose-500/50 text-white rounded-lg p-2 shadow-lg min-w-[200px]",
-  },
-];
+interface FlowCanvasProps {
+  nodes: Node<any>[];
+  edges: Edge[];
+  onNodesChange: OnNodesChange<any>;
+  onEdgesChange: OnEdgesChange;
+  onConnect: (connection: Connection) => void;
+  onNodeClick: (event: React.MouseEvent, node: Node<any>) => void;
+  onPaneClick: () => void;
+  onDrop?: (event: React.DragEvent) => void;
+  onDragOver?: (event: React.DragEvent) => void;
+}
 
-const initialEdges: Edge[] = [
-  { id: "e1-2", source: "1", target: "2", animated: true, style: { stroke: "#10b981", strokeWidth: 2 } },
-  { id: "e2-3", source: "2", target: "3", label: "True", style: { stroke: "#6366f1", strokeWidth: 2 } },
-  { id: "e2-4", source: "2", target: "4", label: "False", style: { stroke: "#f43f5e", strokeWidth: 2 } },
-];
-
-export function FlowCanvas() {
-  const [nodes, , onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
-
-  const onConnect = useCallback(
-    (params: Connection) => setEdges((eds) => addEdge(params, eds)),
-    [setEdges]
+export function FlowCanvas({
+  nodes,
+  edges,
+  onNodesChange,
+  onEdgesChange,
+  onConnect,
+  onNodeClick,
+  onPaneClick,
+  onDrop,
+  onDragOver,
+}: FlowCanvasProps) {
+  const nodeTypes: NodeTypes = useMemo(
+    () => ({
+      entry_command: EntryCommandNode as any,
+      action_response_create: ActionResponseCreateNode as any,
+      action_message_create: ActionMessageCreateNode as any,
+      control_branch: ControlBranchNode as any,
+      control_delay: ControlDelayNode as any,
+      action_variable_set: ActionVariableSetNode as any,
+    }),
+    []
   );
 
   return (
-    <div className="w-full h-full bg-slate-950 rounded-xl border border-slate-800 overflow-hidden shadow-2xl relative">
+    <div
+      className="w-full h-full bg-slate-950 rounded-xl border border-slate-800 overflow-hidden shadow-2xl relative"
+      onDrop={onDrop}
+      onDragOver={onDragOver}
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
+        nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onNodeClick={onNodeClick}
+        onPaneClick={onPaneClick}
         fitView
       >
         <Controls className="bg-slate-900 border border-slate-700 text-white rounded shadow-md" />
