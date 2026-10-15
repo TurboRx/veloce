@@ -67,6 +67,16 @@ func (m *mockAppStore) QueueAppCommandsDeploy(ctx context.Context, appID string,
 	return nil
 }
 
+func (m *mockAppStore) ListActiveApps(ctx context.Context, clusterCount, clusterIndex int) ([]*model.App, error) {
+	var active []*model.App
+	for _, a := range m.apps {
+		if a.Enabled {
+			active = append(active, a)
+		}
+	}
+	return active, nil
+}
+
 type mockBotVerifier struct{}
 
 func (m *mockBotVerifier) VerifyBotToken(ctx context.Context, token string) (*util.DiscordBotInfo, error) {
