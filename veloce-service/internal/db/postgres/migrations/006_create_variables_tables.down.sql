@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS variable_values CASCADE;
+DROP TABLE IF EXISTS variables CASCADE;
