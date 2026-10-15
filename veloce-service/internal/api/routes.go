@@ -24,8 +24,15 @@ func (s *Server) registerRoutes(r *mux.Router) {
 	apiV1.HandleFunc("/auth/callback", s.handleAuthCallback).Methods(http.MethodGet)
 	apiV1.HandleFunc("/auth/logout", s.handleAuthLogout).Methods(http.MethodGet, http.MethodPost)
 
-	// User profile route (requires active session)
+	// User profile route
 	apiV1.HandleFunc("/user/@me", RequireAuth(s.handleCurrentUser)).Methods(http.MethodGet)
+
+	// App & Bot Management routes
+	apiV1.HandleFunc("/apps", RequireAuth(s.handleListApps)).Methods(http.MethodGet)
+	apiV1.HandleFunc("/apps", RequireAuth(s.handleCreateApp)).Methods(http.MethodPost)
+	apiV1.HandleFunc("/apps/{id}", RequireAuth(s.handleGetApp)).Methods(http.MethodGet)
+	apiV1.HandleFunc("/apps/{id}", RequireAuth(s.handleUpdateApp)).Methods(http.MethodPatch)
+	apiV1.HandleFunc("/apps/{id}", RequireAuth(s.handleDeleteApp)).Methods(http.MethodDelete)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/TurboRx/veloce/veloce-service/internal/config"
 	"github.com/TurboRx/veloce/veloce-service/internal/store"
+	"github.com/TurboRx/veloce/veloce-service/internal/util"
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 )
@@ -19,16 +20,33 @@ type Server struct {
 	http         *http.Server
 	userStore    store.UserStore
 	sessionStore store.SessionStore
+	appStore     store.AppStore
+	tokenCrypt   *util.SymmetricCrypt
+	botVerifier  util.BotTokenVerifier
 }
 
-func NewServer(cfg *config.Config, userStore store.UserStore, sessionStore store.SessionStore) *Server {
+func NewServer(
+	cfg *config.Config,
+	userStore store.UserStore,
+	sessionStore store.SessionStore,
+	appStore store.AppStore,
+	tokenCrypt *util.SymmetricCrypt,
+	botVerifier util.BotTokenVerifier,
+) *Server {
 	r := mux.NewRouter()
+
+	if botVerifier == nil {
+		botVerifier = util.NewBotTokenVerifier()
+	}
 
 	s := &Server{
 		config:       cfg,
 		router:       r,
 		userStore:    userStore,
 		sessionStore: sessionStore,
+		appStore:     appStore,
+		tokenCrypt:   tokenCrypt,
+		botVerifier:  botVerifier,
 	}
 
 	if sessionStore != nil {

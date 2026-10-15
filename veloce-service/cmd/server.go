@@ -12,6 +12,7 @@ import (
 	"github.com/TurboRx/veloce/veloce-service/internal/api"
 	"github.com/TurboRx/veloce/veloce-service/internal/config"
 	"github.com/TurboRx/veloce/veloce-service/internal/db/postgres"
+	"github.com/TurboRx/veloce/veloce-service/internal/util"
 	"github.com/urfave/cli/v2"
 )
 
@@ -33,6 +34,18 @@ func ServerCmd() *cli.Command {
 				return err
 			}
 
+			// Initialize Token Encryption
+			var tokenCrypt *util.SymmetricCrypt
+			if cfg.Encryption.TokenEncryptionKey != "" {
+				tc, err := util.NewSymmetricCrypt(cfg.Encryption.TokenEncryptionKey)
+				if err != nil {
+					slog.Warn("Failed to initialize token encryption", slog.String("error", err.Error()))
+				} else {
+					tokenCrypt = tc
+					slog.Info("Token encryption initialized successfully")
+				}
+			}
+
 			// Initialize Database client
 			dbClient, err := postgres.New(cfg.Database.DSN(), 25)
 			if err != nil {
@@ -44,12 +57,15 @@ func ServerCmd() *cli.Command {
 
 			var userStore *postgres.PostgresUserStore
 			var sessionStore *postgres.PostgresSessionStore
+			var appStore *postgres.PostgresAppStore
 			if dbClient != nil && dbClient.DB != nil {
 				userStore = postgres.NewUserStore(dbClient.DB)
 				sessionStore = postgres.NewSessionStore(dbClient.DB)
+				appStore = postgres.NewAppStore(dbClient.DB)
 			}
 
-			server := api.NewServer(cfg, userStore, sessionStore)
+			botVerifier := util.NewBotTokenVerifier()
+			server := api.NewServer(cfg, userStore, sessionStore, appStore, tokenCrypt, botVerifier)
 
 			errChan := make(chan error, 1)
 			go func() {

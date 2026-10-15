@@ -118,6 +118,15 @@ export default function Home() {
               </a>
             )}
 
+            {user && (
+              <Link
+                href="/apps"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 transition"
+              >
+                <Bot className="w-3.5 h-3.5 text-indigo-400" /> My Bots
+              </Link>
+            )}
+
             <Link
               href="/builder"
               className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow transition"
