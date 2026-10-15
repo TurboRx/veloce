@@ -189,11 +189,21 @@ func (s *PostgresAppStore) DeleteApp(ctx context.Context, id string) error {
 }
 
 func (s *PostgresAppStore) QueueAppCommandsDeploy(ctx context.Context, appID string, force bool) error {
-	query := `
-		UPDATE apps 
-		SET commands_deploy_at = (now() AT TIME ZONE 'UTC') + INTERVAL '3 seconds'
-		WHERE id = $1
-	`
+	var query string
+	if force {
+		query = `
+			UPDATE apps 
+			SET commands_deploy_at = (now() AT TIME ZONE 'UTC') + INTERVAL '3 seconds',
+			    commands_deployed_hash = NULL
+			WHERE id = $1
+		`
+	} else {
+		query = `
+			UPDATE apps 
+			SET commands_deploy_at = (now() AT TIME ZONE 'UTC') + INTERVAL '3 seconds'
+			WHERE id = $1
+		`
+	}
 	_, err := s.db.ExecContext(ctx, query, appID)
 	return err
 }
@@ -277,6 +287,52 @@ func (s *PostgresAppStore) ListActiveApps(ctx context.Context, clusterCount, clu
 	}
 
 	return apps, nil
+}
+
+func (s *PostgresAppStore) AppIDsWithDueCommandsDeploy(ctx context.Context, limit int) ([]string, error) {
+	query := `
+		SELECT id
+		FROM apps
+		WHERE enabled = TRUE 
+		  AND commands_deploy_at IS NOT NULL 
+		  AND commands_deploy_at <= (now() AT TIME ZONE 'UTC')
+		ORDER BY commands_deploy_at ASC
+		LIMIT $1
+	`
+	rows, err := s.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query due commands deploy apps: %w", err)
+	}
+	defer rows.Close()
+
+	var appIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan due app id: %w", err)
+		}
+		appIDs = append(appIDs, id)
+	}
+
+	return appIDs, nil
+}
+
+func (s *PostgresAppStore) UpdateCommandsDeployResult(ctx context.Context, appID string, hash string, deployError *string) error {
+	query := `
+		UPDATE apps
+		SET commands_deploy_at = NULL,
+		    commands_deployed_hash = $2,
+		    commands_deploy_error = $3,
+		    updated_at = (now() AT TIME ZONE 'UTC')
+		WHERE id = $1
+	`
+	var errBytes []byte
+	if deployError != nil {
+		errBytes = []byte(fmt.Sprintf("%q", *deployError))
+	}
+
+	_, err := s.db.ExecContext(ctx, query, appID, hash, errBytes)
+	return err
 }
 
 func scanApp(row *sql.Row) (*model.App, error) {

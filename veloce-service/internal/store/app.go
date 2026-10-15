@@ -16,4 +16,6 @@ type AppStore interface {
 	DeleteApp(ctx context.Context, id string) error
 	QueueAppCommandsDeploy(ctx context.Context, appID string, force bool) error
 	ListActiveApps(ctx context.Context, clusterCount, clusterIndex int) ([]*model.App, error)
+	AppIDsWithDueCommandsDeploy(ctx context.Context, limit int) ([]string, error)
+	UpdateCommandsDeployResult(ctx context.Context, appID string, hash string, deployError *string) error
 }
