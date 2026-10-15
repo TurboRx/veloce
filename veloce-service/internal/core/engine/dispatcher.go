@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/TurboRx/veloce/veloce-service/internal/model"
 	"github.com/TurboRx/veloce/veloce-service/internal/store"
 	"github.com/TurboRx/veloce/veloce-service/pkg/flow"
 	"github.com/diamondburned/arikawa/v3/api"
@@ -15,12 +16,17 @@ import (
 
 type InteractionDispatcher struct {
 	commandStore store.CommandStore
+	logStore     store.LogStore
 }
 
-func NewInteractionDispatcher(commandStore store.CommandStore) *InteractionDispatcher {
-	return &InteractionDispatcher{
+func NewInteractionDispatcher(commandStore store.CommandStore, logStore ...store.LogStore) *InteractionDispatcher {
+	d := &InteractionDispatcher{
 		commandStore: commandStore,
 	}
+	if len(logStore) > 0 {
+		d.logStore = logStore[0]
+	}
+	return d
 }
 
 // HandleEvent processes incoming Discord gateway events and executes matching flows.
@@ -64,6 +70,11 @@ func (d *InteractionDispatcher) handleInteraction(
 					slog.String("command_name", cmd.Name),
 					slog.String("error", err.Error()),
 				)
+				d.recordLog(appID, "Failed compiling flow for /"+cmd.Name+": "+err.Error(), model.LogLevelError, map[string]any{
+					"command_name": cmd.Name,
+					"error":        err.Error(),
+					"status":       "compile_error",
+				})
 				return
 			}
 
@@ -83,14 +94,57 @@ func (d *InteractionDispatcher) handleInteraction(
 			})
 			defer autoDeferTimer.Stop()
 
-			if err := compiled.Execute(flowCtx); err != nil {
+			start := time.Now()
+			execErr := compiled.Execute(flowCtx)
+			duration := time.Since(start)
+
+			details := map[string]any{
+				"command_id":   cmd.ID,
+				"command_name": cmd.Name,
+				"duration_ms":  duration.Milliseconds(),
+				"status":       "success",
+			}
+			if sender := e.Sender(); sender != nil {
+				details["user_id"] = sender.ID.String()
+				details["username"] = sender.Username
+			}
+			if e.GuildID.IsValid() {
+				details["guild_id"] = e.GuildID.String()
+			}
+			if e.ChannelID.IsValid() {
+				details["channel_id"] = e.ChannelID.String()
+			}
+
+			if execErr != nil {
+				details["status"] = "error"
+				details["error"] = execErr.Error()
 				slog.Error("Flow execution failed",
 					slog.String("app_id", appID),
 					slog.String("command_name", cmd.Name),
-					slog.String("error", err.Error()),
+					slog.String("error", execErr.Error()),
 				)
+				d.recordLog(appID, "Failed executing /"+cmd.Name+": "+execErr.Error(), model.LogLevelError, details)
+			} else {
+				d.recordLog(appID, "Successfully executed /"+cmd.Name, model.LogLevelInfo, details)
 			}
 			return
 		}
 	}
+}
+
+func (d *InteractionDispatcher) recordLog(appID, message string, level model.LogLevel, details map[string]any) {
+	if d.logStore == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = d.logStore.CreateLog(ctx, &model.Log{
+			AppID:     appID,
+			Message:   message,
+			Level:     level,
+			Details:   details,
+			CreatedAt: time.Now().UTC(),
+		})
+	}()
 }

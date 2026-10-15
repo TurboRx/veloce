@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/TurboRx/veloce/veloce-service/internal/model"
 	"github.com/TurboRx/veloce/veloce-service/internal/util"
+	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/state"
 )
@@ -128,6 +130,24 @@ func (b *BotConnection) Stop() error {
 
 func (b *BotConnection) IsConnected() bool {
 	return b.connected.Load()
+}
+
+func (b *BotConnection) LastPingAt() time.Time {
+	ts := b.lastPing.Load()
+	if ts <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(ts, 0).UTC()
+}
+
+func (b *BotConnection) Guilds() ([]discord.Guild, error) {
+	b.mu.RLock()
+	s := b.session
+	b.mu.RUnlock()
+	if s == nil {
+		return nil, errors.New("bot session is inactive")
+	}
+	return s.Guilds()
 }
 
 func (b *BotConnection) App() *model.App {

@@ -10,6 +10,7 @@ import (
 	"github.com/TurboRx/veloce/veloce-service/internal/model"
 	"github.com/TurboRx/veloce/veloce-service/internal/store"
 	"github.com/TurboRx/veloce/veloce-service/internal/util"
+	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/state"
 )
 
@@ -174,3 +175,41 @@ func (m *GatewayManager) StopAll() {
 	}
 	clear(m.connections)
 }
+
+type GatewayAppStatus struct {
+	Connected  bool      `json:"connected"`
+	LastPingAt time.Time `json:"last_ping_at,omitempty"`
+	GuildCount int       `json:"guild_count"`
+}
+
+// GetAppStatus returns live gateway telemetry for an app.
+func (m *GatewayManager) GetAppStatus(appID string) GatewayAppStatus {
+	m.mu.RLock()
+	conn, ok := m.connections[appID]
+	m.mu.RUnlock()
+
+	if !ok || !conn.IsConnected() {
+		return GatewayAppStatus{Connected: false, GuildCount: 0}
+	}
+
+	guilds, _ := conn.Guilds()
+	return GatewayAppStatus{
+		Connected:  true,
+		LastPingAt: conn.LastPingAt(),
+		GuildCount: len(guilds),
+	}
+}
+
+// ListGuilds returns the cached guilds for an active app session.
+func (m *GatewayManager) ListGuilds(appID string) ([]discord.Guild, error) {
+	m.mu.RLock()
+	conn, ok := m.connections[appID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("no gateway connection for app %s", appID)
+	}
+
+	return conn.Guilds()
+}
+
