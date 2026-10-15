@@ -15,4 +15,5 @@ type AppStore interface {
 	UpdateAppToken(ctx context.Context, appID string, encryptedToken string) error
 	DeleteApp(ctx context.Context, id string) error
 	QueueAppCommandsDeploy(ctx context.Context, appID string, force bool) error
+	ListActiveApps(ctx context.Context, clusterCount, clusterIndex int) ([]*model.App, error)
 }

@@ -198,6 +198,87 @@ func (s *PostgresAppStore) QueueAppCommandsDeploy(ctx context.Context, appID str
 	return err
 }
 
+func (s *PostgresAppStore) ListActiveApps(ctx context.Context, clusterCount, clusterIndex int) ([]*model.App, error) {
+	query := `
+		SELECT 
+			id, name, description, enabled, owner_user_id, creator_user_id,
+			discord_token, discord_id, discord_avatar, discord_status,
+			commands_deploy_at, commands_deployed_hash, commands_deploy_error,
+			created_at, updated_at
+		FROM apps
+		WHERE enabled = TRUE
+		ORDER BY created_at ASC
+	`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query active apps: %w", err)
+	}
+	defer rows.Close()
+
+	var apps []*model.App
+	for rows.Next() {
+		var a model.App
+		var desc, avatar, hash sql.NullString
+		var deployAt sql.NullTime
+		var status, deployError []byte
+
+		err := rows.Scan(
+			&a.ID,
+			&a.Name,
+			&desc,
+			&a.Enabled,
+			&a.OwnerUserID,
+			&a.CreatorUserID,
+			&a.DiscordToken,
+			&a.DiscordID,
+			&avatar,
+			&status,
+			&deployAt,
+			&hash,
+			&deployError,
+			&a.CreatedAt,
+			&a.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan active app: %w", err)
+		}
+
+		if desc.Valid {
+			a.Description = &desc.String
+		}
+		if avatar.Valid {
+			a.DiscordAvatar = &avatar.String
+		}
+		if hash.Valid {
+			a.CommandsDeployedHash = &hash.String
+		}
+		if deployAt.Valid {
+			a.CommandsDeployAt = &deployAt.Time
+		}
+		if status != nil {
+			a.DiscordStatus = status
+		}
+		if deployError != nil {
+			a.CommandsDeployError = deployError
+		}
+
+		// Sharding filter if multiple clusters
+		if clusterCount > 1 {
+			var h uint32
+			for i := 0; i < len(a.ID); i++ {
+				h = h*31 + uint32(a.ID[i])
+			}
+			if int(h%uint32(clusterCount)) != clusterIndex {
+				continue
+			}
+		}
+
+		apps = append(apps, &a)
+	}
+
+	return apps, nil
+}
+
 func scanApp(row *sql.Row) (*model.App, error) {
 	var a model.App
 	var desc, avatar, hash sql.NullString
