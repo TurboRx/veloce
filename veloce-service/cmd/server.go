@@ -11,6 +11,7 @@ import (
 
 	"github.com/TurboRx/veloce/veloce-service/internal/api"
 	"github.com/TurboRx/veloce/veloce-service/internal/config"
+	"github.com/TurboRx/veloce/veloce-service/internal/core/gateway"
 	"github.com/TurboRx/veloce/veloce-service/internal/db/postgres"
 	"github.com/TurboRx/veloce/veloce-service/internal/util"
 	"github.com/urfave/cli/v2"
@@ -67,6 +68,26 @@ func ServerCmd() *cli.Command {
 			botVerifier := util.NewBotTokenVerifier()
 			server := api.NewServer(cfg, userStore, sessionStore, appStore, tokenCrypt, botVerifier)
 
+			gatewayCtx, cancelGateway := context.WithCancel(context.Background())
+			defer cancelGateway()
+
+			if cfg.Gateway.Enabled && appStore != nil && tokenCrypt != nil {
+				eventRouter := gateway.NewEventRouter()
+				eventRouter.RegisterHandler(&gateway.LoggingEventHandler{})
+
+				gatewayManager := gateway.NewGatewayManager(
+					appStore,
+					tokenCrypt,
+					eventRouter,
+					gateway.GatewayManagerConfig{
+						ClusterCount: cfg.Gateway.ClusterCount,
+						ClusterIndex: cfg.Gateway.ClusterIndex,
+						PollInterval: 10 * time.Second,
+					},
+				)
+				go gatewayManager.Run(gatewayCtx)
+			}
+
 			errChan := make(chan error, 1)
 			go func() {
 				errChan <- server.Start()
@@ -78,6 +99,7 @@ func ServerCmd() *cli.Command {
 			select {
 			case sig := <-quit:
 				slog.Info("Received signal, exiting gracefully", slog.String("signal", sig.String()))
+				cancelGateway()
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				if err := server.Shutdown(ctx); err != nil {
@@ -85,6 +107,7 @@ func ServerCmd() *cli.Command {
 				}
 				return nil
 			case err := <-errChan:
+				cancelGateway()
 				return err
 			}
 		},

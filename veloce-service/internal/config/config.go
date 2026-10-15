@@ -16,6 +16,7 @@ type Config struct {
 	Storage    StorageConfig    `koanf:"storage"`
 	Encryption EncryptionConfig `koanf:"encryption"`
 	Discord    DiscordConfig    `koanf:"discord"`
+	Gateway    GatewayConfig    `koanf:"gateway"`
 }
 
 type ServerConfig struct {
@@ -51,6 +52,12 @@ type DiscordConfig struct {
 	RedirectURI  string `koanf:"redirect_uri"`
 }
 
+type GatewayConfig struct {
+	Enabled      bool `koanf:"enabled"`
+	ClusterCount int  `koanf:"cluster_count"`
+	ClusterIndex int  `koanf:"cluster_index"`
+}
+
 func (d *DatabaseConfig) DSN() string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		d.User, d.Password, d.Host, d.Port, d.Database, d.SSLMode)
@@ -73,6 +80,9 @@ func Load(path string) (*Config, error) {
 		"storage.endpoint":       "localhost:9000",
 		"storage.bucket":         "veloce-assets",
 		"storage.use_ssl":        false,
+		"gateway.enabled":        true,
+		"gateway.cluster_count":  1,
+		"gateway.cluster_index":  0,
 	}
 
 	for key, val := range defaults {
