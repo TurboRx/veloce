@@ -1,6 +1,6 @@
 module github.com/TurboRx/veloce/veloce-service
 
-go 1.25.11
+go 1.26.0
 
 require (
 	github.com/golang-migrate/migrate/v4 v4.20.1
@@ -10,8 +10,10 @@ require (
 	github.com/knadh/koanf/providers/file v0.1.0
 	github.com/knadh/koanf/v2 v2.1.2
 	github.com/lib/pq v1.12.3
+	github.com/matoous/go-nanoid/v2 v2.1.0
 	github.com/rs/cors v1.11.1
 	github.com/urfave/cli/v2 v2.27.6
+	golang.org/x/oauth2 v0.36.0
 )
 
 require (
