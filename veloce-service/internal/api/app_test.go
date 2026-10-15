@@ -18,7 +18,9 @@ type mockAppStore struct {
 }
 
 func (m *mockAppStore) CreateApp(ctx context.Context, app *model.App) (*model.App, error) {
-	app.ID = "app_123"
+	if app.ID == "" {
+		app.ID = "app_123"
+	}
 	m.apps[app.ID] = app
 	return app, nil
 }
@@ -77,6 +79,14 @@ func (m *mockAppStore) ListActiveApps(ctx context.Context, clusterCount, cluster
 	return active, nil
 }
 
+func (m *mockAppStore) AppIDsWithDueCommandsDeploy(ctx context.Context, limit int) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockAppStore) UpdateCommandsDeployResult(ctx context.Context, appID string, hash string, deployError *string) error {
+	return nil
+}
+
 type mockBotVerifier struct{}
 
 func (m *mockBotVerifier) VerifyBotToken(ctx context.Context, token string) (*util.DiscordBotInfo, error) {
@@ -100,7 +110,7 @@ func TestAppEndpoints(t *testing.T) {
 	crypt, _ := util.NewSymmetricCrypt(key)
 
 	store := &mockAppStore{apps: make(map[string]*model.App)}
-	server := NewServer(cfg, nil, nil, store, crypt, &mockBotVerifier{})
+	server := NewServer(cfg, nil, nil, store, nil, crypt, &mockBotVerifier{})
 
 	user := &model.User{ID: "usr_owner_1"}
 

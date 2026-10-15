@@ -21,6 +21,7 @@ type Server struct {
 	userStore    store.UserStore
 	sessionStore store.SessionStore
 	appStore     store.AppStore
+	commandStore store.CommandStore
 	tokenCrypt   *util.SymmetricCrypt
 	botVerifier  util.BotTokenVerifier
 }
@@ -30,6 +31,7 @@ func NewServer(
 	userStore store.UserStore,
 	sessionStore store.SessionStore,
 	appStore store.AppStore,
+	commandStore store.CommandStore,
 	tokenCrypt *util.SymmetricCrypt,
 	botVerifier util.BotTokenVerifier,
 ) *Server {
@@ -45,6 +47,7 @@ func NewServer(
 		userStore:    userStore,
 		sessionStore: sessionStore,
 		appStore:     appStore,
+		commandStore: commandStore,
 		tokenCrypt:   tokenCrypt,
 		botVerifier:  botVerifier,
 	}

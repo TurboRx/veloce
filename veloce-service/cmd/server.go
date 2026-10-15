@@ -11,6 +11,8 @@ import (
 
 	"github.com/TurboRx/veloce/veloce-service/internal/api"
 	"github.com/TurboRx/veloce/veloce-service/internal/config"
+	"github.com/TurboRx/veloce/veloce-service/internal/core/command"
+	"github.com/TurboRx/veloce/veloce-service/internal/core/engine"
 	"github.com/TurboRx/veloce/veloce-service/internal/core/gateway"
 	"github.com/TurboRx/veloce/veloce-service/internal/db/postgres"
 	"github.com/TurboRx/veloce/veloce-service/internal/util"
@@ -59,14 +61,16 @@ func ServerCmd() *cli.Command {
 			var userStore *postgres.PostgresUserStore
 			var sessionStore *postgres.PostgresSessionStore
 			var appStore *postgres.PostgresAppStore
+			var commandStore *postgres.PostgresCommandStore
 			if dbClient != nil && dbClient.DB != nil {
 				userStore = postgres.NewUserStore(dbClient.DB)
 				sessionStore = postgres.NewSessionStore(dbClient.DB)
 				appStore = postgres.NewAppStore(dbClient.DB)
+				commandStore = postgres.NewCommandStore(dbClient.DB)
 			}
 
 			botVerifier := util.NewBotTokenVerifier()
-			server := api.NewServer(cfg, userStore, sessionStore, appStore, tokenCrypt, botVerifier)
+			server := api.NewServer(cfg, userStore, sessionStore, appStore, commandStore, tokenCrypt, botVerifier)
 
 			gatewayCtx, cancelGateway := context.WithCancel(context.Background())
 			defer cancelGateway()
@@ -74,6 +78,11 @@ func ServerCmd() *cli.Command {
 			if cfg.Gateway.Enabled && appStore != nil && tokenCrypt != nil {
 				eventRouter := gateway.NewEventRouter()
 				eventRouter.RegisterHandler(&gateway.LoggingEventHandler{})
+
+				if commandStore != nil {
+					dispatcher := engine.NewInteractionDispatcher(commandStore)
+					eventRouter.RegisterHandler(dispatcher)
+				}
 
 				gatewayManager := gateway.NewGatewayManager(
 					appStore,
@@ -86,6 +95,11 @@ func ServerCmd() *cli.Command {
 					},
 				)
 				go gatewayManager.Run(gatewayCtx)
+
+				if commandStore != nil {
+					commandManager := command.NewCommandManager(appStore, commandStore, gatewayManager, tokenCrypt)
+					go commandManager.Run(gatewayCtx)
+				}
 			}
 
 			errChan := make(chan error, 1)
