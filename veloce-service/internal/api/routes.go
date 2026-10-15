@@ -33,6 +33,14 @@ func (s *Server) registerRoutes(r *mux.Router) {
 	apiV1.HandleFunc("/apps/{id}", RequireAuth(s.handleGetApp)).Methods(http.MethodGet)
 	apiV1.HandleFunc("/apps/{id}", RequireAuth(s.handleUpdateApp)).Methods(http.MethodPatch)
 	apiV1.HandleFunc("/apps/{id}", RequireAuth(s.handleDeleteApp)).Methods(http.MethodDelete)
+
+	// Command Flow routes
+	apiV1.HandleFunc("/apps/{app_id}/commands", RequireAuth(s.handleListCommands)).Methods(http.MethodGet)
+	apiV1.HandleFunc("/apps/{app_id}/commands", RequireAuth(s.handleCreateCommand)).Methods(http.MethodPost)
+	apiV1.HandleFunc("/apps/{app_id}/commands/{id}", RequireAuth(s.handleGetCommand)).Methods(http.MethodGet)
+	apiV1.HandleFunc("/apps/{app_id}/commands/{id}", RequireAuth(s.handleUpdateCommand)).Methods(http.MethodPatch)
+	apiV1.HandleFunc("/apps/{app_id}/commands/{id}", RequireAuth(s.handleDeleteCommand)).Methods(http.MethodDelete)
+	apiV1.HandleFunc("/apps/{app_id}/commands/deploy", RequireAuth(s.handleDeployCommands)).Methods(http.MethodPost)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

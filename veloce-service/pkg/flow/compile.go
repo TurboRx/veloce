@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
 )
 
@@ -88,8 +89,8 @@ func CompileCommand(data FlowData) (*CompiledFlowNode, error) {
 	return entryNode, nil
 }
 
-func (n *CompiledFlowNode) CommandData() discord.Command {
-	cmd := discord.Command{
+func (n *CompiledFlowNode) CommandData() api.CreateCommandData {
+	cmd := api.CreateCommandData{
 		Name:        n.Data.Name,
 		Description: n.Data.Description,
 	}

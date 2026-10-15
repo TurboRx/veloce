@@ -137,6 +137,14 @@ func (m *mockAppStore) QueueAppCommandsDeploy(ctx context.Context, appID string,
 	return nil
 }
 
+func (m *mockAppStore) AppIDsWithDueCommandsDeploy(ctx context.Context, limit int) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockAppStore) UpdateCommandsDeployResult(ctx context.Context, appID string, hash string, deployError *string) error {
+	return nil
+}
+
 func TestGatewayManagerReconcile(t *testing.T) {
 	crypt, err := util.NewSymmetricCrypt("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	if err != nil {
