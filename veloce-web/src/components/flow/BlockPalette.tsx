@@ -1,5 +1,4 @@
-import React from "react";
-import { Terminal, Send, MessageSquare, GitFork, Clock, Database } from "lucide-react";
+import { Terminal, Send, MessageSquare, GitFork, Clock, Database, Zap } from "lucide-react";
 import { FlowNodeType } from "@/lib/api";
 
 interface PaletteItem {
@@ -11,6 +10,18 @@ interface PaletteItem {
 }
 
 const PALETTE_GROUPS: { name: string; items: PaletteItem[] }[] = [
+  {
+    name: "Entry & Triggers",
+    items: [
+      {
+        type: "entry_event",
+        title: "Event Listener",
+        subtitle: "Discord gateway event",
+        icon: Zap,
+        colorClass: "border-amber-500/40 text-amber-400 hover:border-amber-400",
+      },
+    ],
+  },
   {
     name: "Actions",
     items: [

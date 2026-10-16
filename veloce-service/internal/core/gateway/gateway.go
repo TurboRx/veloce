@@ -58,8 +58,13 @@ func (b *BotConnection) Start(parentCtx context.Context) error {
 	// Create Arikawa state session
 	s := state.New("Bot " + rawToken)
 
-	// Standard default intents for receiving guild interactions and slash commands
-	s.AddIntents(gateway.IntentGuilds)
+	// Standard default intents for receiving guild interactions, events and slash commands
+	s.AddIntents(
+		gateway.IntentGuilds |
+			gateway.IntentGuildMessages |
+			gateway.IntentGuildMessageReactions |
+			gateway.IntentGuildMembers,
+	)
 
 	// Register event listener
 	s.AddHandler(func(e gateway.Event) {

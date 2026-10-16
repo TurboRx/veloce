@@ -38,6 +38,7 @@ export type FlowNodeType =
 export interface FlowNodeData {
   name?: string;
   description?: string;
+  event_type?: string;
   command_argument_type?: string;
   command_argument_required?: boolean;
   response_content?: string;
@@ -78,6 +79,28 @@ export interface Command {
   enabled: boolean;
   creator_user_id: string;
   flow_source: FlowData;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EventListenerFilter {
+  channels?: string[];
+  roles?: string[];
+  ignore_bots?: boolean;
+}
+
+export interface EventListener {
+  id: string;
+  source: "discord" | "schedule" | "webhook";
+  type: string;
+  description: string;
+  enabled: boolean;
+  app_id: string;
+  creator_user_id: string;
+  filter?: EventListenerFilter;
+  flow_source: FlowData;
+  webhook_secret?: string;
+  last_run_at?: string;
   created_at: string;
   updated_at: string;
 }
@@ -168,6 +191,42 @@ export const api = {
     request<{ queued: boolean; message: string }>(`/v1/apps/${appId}/commands/deploy`, {
       method: "POST",
     }),
+
+  // Event Listeners
+  listEventListeners: (appId: string) =>
+    request<EventListener[]>(`/v1/apps/${appId}/events`),
+  getEventListener: (appId: string, eventId: string) =>
+    request<EventListener>(`/v1/apps/${appId}/events/${eventId}`),
+  createEventListener: (
+    appId: string,
+    data: {
+      type: string;
+      description: string;
+      flow_source: FlowData;
+      filter?: EventListenerFilter;
+    }
+  ) =>
+    request<EventListener>(`/v1/apps/${appId}/events`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateEventListener: (
+    appId: string,
+    eventId: string,
+    data: {
+      type?: string;
+      description?: string;
+      enabled?: boolean;
+      filter?: EventListenerFilter;
+      flow_source?: FlowData;
+    }
+  ) =>
+    request<EventListener>(`/v1/apps/${appId}/events/${eventId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  deleteEventListener: (appId: string, eventId: string) =>
+    request<{ success: boolean }>(`/v1/apps/${appId}/events/${eventId}`, { method: "DELETE" }),
 
   // Telemetry & Logs
   listLogs: (appId: string, limit?: number, offset?: number) =>

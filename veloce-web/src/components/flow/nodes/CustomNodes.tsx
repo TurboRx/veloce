@@ -1,9 +1,42 @@
 import React from "react";
 import { Handle, Position, NodeProps, Node } from "@xyflow/react";
-import { Terminal, Send, GitFork, Clock, Database, MessageSquare } from "lucide-react";
+import { Terminal, Send, GitFork, Clock, Database, MessageSquare, Zap } from "lucide-react";
 import { FlowNodeData } from "@/lib/api";
 
 export type FlowCustomNode = Node<{ data: FlowNodeData }>;
+
+export function EntryEventNode({ data, selected }: NodeProps<FlowCustomNode>) {
+  const nodeData = data?.data;
+  return (
+    <div
+      className={`rounded-xl bg-slate-900 border-2 min-w-[200px] shadow-xl transition-all ${
+        selected ? "border-amber-400 ring-2 ring-amber-400/20" : "border-amber-500/40 hover:border-amber-500"
+      }`}
+    >
+      <div className="bg-amber-950/60 px-3 py-1.5 border-b border-amber-500/30 flex items-center justify-between rounded-t-xl">
+        <div className="flex items-center gap-1.5 text-amber-400 text-xs font-semibold tracking-wider">
+          <Zap className="w-3.5 h-3.5" />
+          <span>EVENT LISTENER</span>
+        </div>
+        <span className="text-[10px] font-mono bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">Event</span>
+      </div>
+      <div className="p-3">
+        <div className="text-sm font-bold text-slate-100 font-mono capitalize">
+          {nodeData?.event_type || nodeData?.name || "message_create"}
+        </div>
+        <div className="text-xs text-slate-400 mt-1 line-clamp-2">
+          {nodeData?.description || "Triggers when event occurs"}
+        </div>
+      </div>
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        id="default"
+        className="!w-3 !h-3 !bg-amber-400 !border-2 !border-slate-900"
+      />
+    </div>
+  );
+}
 
 export function EntryCommandNode({ data, selected }: NodeProps<FlowCustomNode>) {
   const nodeData = data?.data;

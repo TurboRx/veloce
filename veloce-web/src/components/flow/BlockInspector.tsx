@@ -29,7 +29,7 @@ export function BlockInspector({
   }
 
   const { id, type, data } = selectedNode;
-  const isEntry = type === "entry_command";
+  const isEntry = type === "entry_command" || type === "entry_event";
 
   const handleChange = (field: keyof FlowNodeData, value: any) => {
     onUpdateNodeData(id, { [field]: value });
@@ -49,6 +49,43 @@ export function BlockInspector({
         </div>
 
         {/* Dynamic Fields by Type */}
+        {type === "entry_event" && (
+          <div className="space-y-4 text-xs">
+            <div>
+              <label className="text-slate-300 font-medium block mb-1">
+                Event Type <span className="text-rose-400">*</span>
+              </label>
+              <select
+                value={data?.data?.event_type || "message_create"}
+                onChange={(e) => handleChange("event_type", e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none focus:border-amber-500"
+              >
+                <option value="message_create">message_create (New Message)</option>
+                <option value="message_update">message_update (Edited Message)</option>
+                <option value="message_delete">message_delete (Deleted Message)</option>
+                <option value="guild_member_add">guild_member_add (Member Joined)</option>
+                <option value="guild_member_remove">guild_member_remove (Member Left)</option>
+                <option value="message_reaction_add">message_reaction_add (Reaction Added)</option>
+                <option value="message_reaction_remove">message_reaction_remove (Reaction Removed)</option>
+                <option value="guild_boost">guild_boost (Server Boosted)</option>
+              </select>
+              <p className="text-[10px] text-slate-500 mt-1">Select the Discord gateway event trigger.</p>
+            </div>
+
+            <div>
+              <label className="text-slate-300 font-medium block mb-1">
+                Description
+              </label>
+              <textarea
+                rows={3}
+                value={data?.data?.description || ""}
+                onChange={(e) => handleChange("description", e.target.value)}
+                placeholder="What this event listener does"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-amber-500 resize-none"
+              />
+            </div>
+          </div>
+        )}
         {type === "entry_command" && (
           <div className="space-y-4 text-xs">
             <div>

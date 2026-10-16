@@ -9,6 +9,7 @@ import (
 	"github.com/TurboRx/veloce/veloce-service/pkg/eval"
 	"github.com/TurboRx/veloce/veloce-service/pkg/thing"
 	"github.com/diamondburned/arikawa/v3/discord"
+	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/state"
 )
 
@@ -59,6 +60,47 @@ func NewFlowContext(
 	}
 
 	// Dynamic context getters for variable lookups and preceding node results
+	fc.EvalCtx.Env["var"] = func(name string) any {
+		fc.mu.RLock()
+		defer fc.mu.RUnlock()
+		if val, ok := fc.variables[name]; ok {
+			return val.Value
+		}
+		return nil
+	}
+
+	fc.EvalCtx.Env["result"] = func(nodeID string) any {
+		fc.mu.RLock()
+		defer fc.mu.RUnlock()
+		if val, ok := fc.nodeResults[nodeID]; ok {
+			return val.Value
+		}
+		return nil
+	}
+
+	return fc
+}
+
+func NewFlowEventContext(
+	ctx context.Context,
+	timeout time.Duration,
+	session *state.State,
+	event gateway.Event,
+) *FlowContext {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+
+	evalCtx := eval.NewContextFromGatewayEvent(event, session)
+	fc := &FlowContext{
+		Context:     ctx,
+		Cancel:      cancel,
+		Session:     session,
+		EvalCtx:     evalCtx,
+		variables:   make(map[string]thing.Thing),
+		nodeResults: make(map[string]thing.Thing),
+		maxStack:    100,
+		maxOps:      1000,
+	}
+
 	fc.EvalCtx.Env["var"] = func(name string) any {
 		fc.mu.RLock()
 		defer fc.mu.RUnlock()

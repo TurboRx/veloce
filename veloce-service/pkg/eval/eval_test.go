@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/diamondburned/arikawa/v3/discord"
+	"github.com/diamondburned/arikawa/v3/gateway"
 )
 
 func TestEvalExpressions(t *testing.T) {
@@ -143,6 +144,33 @@ func TestInteractionContext(t *testing.T) {
 		t.Fatalf("eval failed: %v", err)
 	}
 	expected := "Action by AdminUser with reason: Spamming"
+	if res != expected {
+		t.Fatalf("expected '%s', got '%s'", expected, res)
+	}
+}
+
+func TestEventContext(t *testing.T) {
+	ctx := context.Background()
+
+	msgEvent := &gateway.MessageCreateEvent{
+		Message: discord.Message{
+			ID:        discord.MessageID(99999),
+			ChannelID: discord.ChannelID(88888),
+			Content:   "Hello world",
+			Author: discord.User{
+				ID:       discord.UserID(77777),
+				Username: "DiscordChatter",
+			},
+		},
+	}
+
+	c := NewContextFromGatewayEvent(msgEvent, nil)
+
+	res, err := EvalTemplateToString(ctx, "Message: {{message.content}} from {{user.username}} in {{channel.id}}", c)
+	if err != nil {
+		t.Fatalf("eval failed: %v", err)
+	}
+	expected := "Message: Hello world from DiscordChatter in 88888"
 	if res != expected {
 		t.Fatalf("expected '%s', got '%s'", expected, res)
 	}
