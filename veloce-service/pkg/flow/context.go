@@ -8,6 +8,7 @@ import (
 
 	"github.com/TurboRx/veloce/veloce-service/pkg/eval"
 	"github.com/TurboRx/veloce/veloce-service/pkg/thing"
+	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/state"
@@ -17,9 +18,10 @@ type FlowContext struct {
 	context.Context
 	Cancel context.CancelFunc
 
-	Session     *state.State
-	Interaction *discord.InteractionEvent
-	EvalCtx     eval.Context
+	Session      *state.State
+	Interaction  *discord.InteractionEvent
+	HTTPResponse *api.InteractionResponse
+	EvalCtx      eval.Context
 
 	mu          sync.RWMutex
 	variables   map[string]thing.Thing
@@ -31,6 +33,7 @@ type FlowContext struct {
 	operations   int
 	maxOps       int
 }
+
 
 func NewFlowContext(
 	ctx context.Context,
@@ -163,6 +166,22 @@ func (c *FlowContext) HasResponded() bool {
 	defer c.mu.RUnlock()
 	return c.hasResponded
 }
+
+func (c *FlowContext) SetHTTPResponse(resp api.InteractionResponse) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.HTTPResponse == nil {
+		c.HTTPResponse = &resp
+		c.hasResponded = true
+	}
+}
+
+func (c *FlowContext) GetHTTPResponse() *api.InteractionResponse {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.HTTPResponse
+}
+
 
 func (c *FlowContext) StartOperation() error {
 	if c.Err() != nil {

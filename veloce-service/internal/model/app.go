@@ -14,6 +14,7 @@ type App struct {
 	CreatorUserID        string          `json:"creator_user_id"`
 	DiscordToken         string          `json:"-"` // Never expose token in JSON
 	DiscordID            string          `json:"discord_id"`
+	DiscordPublicKey     *string         `json:"discord_public_key,omitempty"`
 	DiscordAvatar        *string         `json:"discord_avatar,omitempty"`
 	DiscordStatus        json.RawMessage `json:"discord_status,omitempty"`
 	CommandsDeployAt     *time.Time      `json:"commands_deploy_at,omitempty"`

@@ -58,6 +58,11 @@ func (s *Server) registerRoutes(r *mux.Router) {
 	apiV1.HandleFunc("/apps/{app_id}/gateway", RequireAuth(s.handleGetGatewayStatus)).Methods(http.MethodGet)
 	apiV1.HandleFunc("/apps/{app_id}/guilds", RequireAuth(s.handleListGuilds)).Methods(http.MethodGet)
 
+	// Serverless Discord HTTP Interactions (Webhooks)
+	apiV1.HandleFunc("/interactions/{app_id}", s.handleDiscordInteraction).Methods(http.MethodPost)
+	r.HandleFunc("/interactions/{app_id}", s.handleDiscordInteraction).Methods(http.MethodPost)
+
+
 	// Web frontend static routing (embedded via 'embedweb' tag or served)
 	webHandler, err := veloceweb.NewHandler()
 	if err == nil {

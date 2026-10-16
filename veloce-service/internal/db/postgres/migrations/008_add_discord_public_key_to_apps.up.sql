@@ -1,0 +1,1 @@
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS discord_public_key TEXT;

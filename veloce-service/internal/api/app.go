@@ -12,6 +12,7 @@ type CreateAppRequest struct {
 	Token       string  `json:"token"`
 	Name        *string `json:"name,omitempty"`
 	Description *string `json:"description,omitempty"`
+	PublicKey   *string `json:"public_key,omitempty"`
 }
 
 type UpdateAppRequest struct {
@@ -20,7 +21,9 @@ type UpdateAppRequest struct {
 	Enabled     *bool            `json:"enabled,omitempty"`
 	Status      *json.RawMessage `json:"status,omitempty"`
 	Token       *string          `json:"token,omitempty"`
+	PublicKey   *string          `json:"public_key,omitempty"`
 }
+
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	user := GetUserFromContext(r.Context())
@@ -103,14 +106,15 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	app := &model.App{
-		Name:          name,
-		Description:   req.Description,
-		Enabled:       true,
-		OwnerUserID:   user.ID,
-		CreatorUserID: user.ID,
-		DiscordToken:  encryptedToken,
-		DiscordID:     botInfo.ID,
-		DiscordAvatar: botInfo.Avatar,
+		Name:             name,
+		Description:      req.Description,
+		Enabled:          true,
+		OwnerUserID:      user.ID,
+		CreatorUserID:    user.ID,
+		DiscordToken:     encryptedToken,
+		DiscordID:        botInfo.ID,
+		DiscordPublicKey: req.PublicKey,
+		DiscordAvatar:    botInfo.Avatar,
 	}
 
 	created, err := s.appStore.CreateApp(r.Context(), app)
@@ -176,6 +180,10 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	if req.Status != nil {
 		app.DiscordStatus = *req.Status
 	}
+	if req.PublicKey != nil {
+		app.DiscordPublicKey = req.PublicKey
+	}
+
 
 	if req.Token != nil && *req.Token != "" {
 		botInfo, err := s.botVerifier.VerifyBotToken(r.Context(), *req.Token)
