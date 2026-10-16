@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/knadh/koanf/parsers/toml"
@@ -9,6 +11,7 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 )
+
 
 type Config struct {
 	Server     ServerConfig     `koanf:"server"`
@@ -32,6 +35,7 @@ type DatabaseConfig struct {
 	Password string `koanf:"password"`
 	Database string `koanf:"database"`
 	SSLMode  string `koanf:"ssl_mode"`
+	URL      string `koanf:"url"`
 }
 
 type StorageConfig struct {
@@ -59,9 +63,16 @@ type GatewayConfig struct {
 }
 
 func (d *DatabaseConfig) DSN() string {
+	if d.URL != "" {
+		return d.URL
+	}
+	if envURL := os.Getenv("DATABASE_URL"); envURL != "" {
+		return envURL
+	}
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		d.User, d.Password, d.Host, d.Port, d.Database, d.SSLMode)
 }
+
 
 func Load(path string) (*Config, error) {
 	k := koanf.New(".")
@@ -117,5 +128,30 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	// Standard cloud environment variable overrides
+	if portStr := os.Getenv("PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			cfg.Server.Port = p
+		}
+	}
+	if pubURL := os.Getenv("PUBLIC_BASE_URL"); pubURL != "" {
+		cfg.Server.PublicBaseURL = pubURL
+	} else if renderURL := os.Getenv("RENDER_EXTERNAL_URL"); renderURL != "" {
+		cfg.Server.PublicBaseURL = renderURL
+	}
+	if encKey := os.Getenv("TOKEN_ENCRYPTION_KEY"); encKey != "" {
+		cfg.Encryption.TokenEncryptionKey = encKey
+	}
+	if dID := os.Getenv("DISCORD_CLIENT_ID"); dID != "" {
+		cfg.Discord.ClientID = dID
+	}
+	if dSecret := os.Getenv("DISCORD_CLIENT_SECRET"); dSecret != "" {
+		cfg.Discord.ClientSecret = dSecret
+	}
+	if dRedirect := os.Getenv("DISCORD_REDIRECT_URI"); dRedirect != "" {
+		cfg.Discord.RedirectURI = dRedirect
+	}
+
 	return &cfg, nil
 }
+

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/TurboRx/veloce/veloce-service/internal/config"
@@ -15,6 +17,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 )
+
 
 type GatewayInspector interface {
 	GetAppStatus(appID string) gateway.GatewayAppStatus
@@ -68,12 +71,29 @@ func NewServer(
 
 	s.registerRoutes(r)
 
+	allowedOrigins := []string{"http://localhost:3000", cfg.Server.PublicBaseURL}
+	if envOrigins := os.Getenv("ALLOWED_ORIGINS"); envOrigins != "" {
+		for _, o := range strings.Split(envOrigins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				allowedOrigins = append(allowedOrigins, o)
+			}
+		}
+	}
+
 	c := cors.New(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000", cfg.Server.PublicBaseURL},
+		AllowedOrigins: allowedOrigins,
+		AllowOriginFunc: func(origin string) bool {
+			if strings.HasSuffix(origin, ".vercel.app") || strings.HasPrefix(origin, "http://localhost:") {
+				return true
+			}
+			return false
+		},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"*"},
 		AllowCredentials: true,
 	})
+
 
 	s.http = &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),

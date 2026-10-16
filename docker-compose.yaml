@@ -1,4 +1,22 @@
 services:
+  veloce:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      DATABASE_URL: "postgres://postgres:veloce_dev_password@postgres:5432/veloce?sslmode=disable"
+      TOKEN_ENCRYPTION_KEY: "${TOKEN_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef}"
+      DISCORD_CLIENT_ID: "${DISCORD_CLIENT_ID:-}"
+      DISCORD_CLIENT_SECRET: "${DISCORD_CLIENT_SECRET:-}"
+      DISCORD_REDIRECT_URI: "${DISCORD_REDIRECT_URI:-http://localhost:8080/v1/auth/callback}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-http://localhost:8080}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   postgres:
     image: postgres:16-alpine
     restart: always
