@@ -29,6 +29,7 @@ type Server struct {
 	sessionStore     store.SessionStore
 	appStore         store.AppStore
 	commandStore     store.CommandStore
+	eventListenerStore store.EventListenerStore
 	logStore         store.LogStore
 	gatewayInspector GatewayInspector
 	tokenCrypt       *util.SymmetricCrypt
@@ -87,6 +88,10 @@ func NewServer(
 
 func (s *Server) SetLogStore(ls store.LogStore) {
 	s.logStore = ls
+}
+
+func (s *Server) SetEventListenerStore(els store.EventListenerStore) {
+	s.eventListenerStore = els
 }
 
 func (s *Server) SetGatewayInspector(gi GatewayInspector) {

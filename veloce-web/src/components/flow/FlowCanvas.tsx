@@ -14,6 +14,7 @@ import {
 } from "@xyflow/react";
 import {
   EntryCommandNode,
+  EntryEventNode,
   ActionResponseCreateNode,
   ActionMessageCreateNode,
   ControlBranchNode,
@@ -47,6 +48,7 @@ export function FlowCanvas({
   const nodeTypes: NodeTypes = useMemo(
     () => ({
       entry_command: EntryCommandNode as any,
+      entry_event: EntryEventNode as any,
       action_response_create: ActionResponseCreateNode as any,
       action_message_create: ActionMessageCreateNode as any,
       control_branch: ControlBranchNode as any,

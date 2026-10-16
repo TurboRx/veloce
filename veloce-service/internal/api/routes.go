@@ -42,6 +42,13 @@ func (s *Server) registerRoutes(r *mux.Router) {
 	apiV1.HandleFunc("/apps/{app_id}/commands/{id}", RequireAuth(s.handleDeleteCommand)).Methods(http.MethodDelete)
 	apiV1.HandleFunc("/apps/{app_id}/commands/deploy", RequireAuth(s.handleDeployCommands)).Methods(http.MethodPost)
 
+	// Event Listener routes
+	apiV1.HandleFunc("/apps/{app_id}/events", RequireAuth(s.handleListEventListeners)).Methods(http.MethodGet)
+	apiV1.HandleFunc("/apps/{app_id}/events", RequireAuth(s.handleCreateEventListener)).Methods(http.MethodPost)
+	apiV1.HandleFunc("/apps/{app_id}/events/{id}", RequireAuth(s.handleGetEventListener)).Methods(http.MethodGet)
+	apiV1.HandleFunc("/apps/{app_id}/events/{id}", RequireAuth(s.handleUpdateEventListener)).Methods(http.MethodPatch)
+	apiV1.HandleFunc("/apps/{app_id}/events/{id}", RequireAuth(s.handleDeleteEventListener)).Methods(http.MethodDelete)
+
 	// Telemetry & Logs routes
 	apiV1.HandleFunc("/apps/{app_id}/logs", RequireAuth(s.handleListLogs)).Methods(http.MethodGet)
 	apiV1.HandleFunc("/apps/{app_id}/gateway", RequireAuth(s.handleGetGatewayStatus)).Methods(http.MethodGet)

@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/diamondburned/arikawa/v3/discord"
+	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/state"
 	"github.com/expr-lang/expr/ast"
 )
@@ -325,6 +326,239 @@ func NewContextFromInteraction(i *discord.InteractionEvent, session *state.State
 				}
 				return nil
 			},
+		},
+	}
+}
+
+type MessageEnv struct {
+	ID        string `expr:"id" json:"id"`
+	Content   string `expr:"content" json:"content"`
+	ChannelID string `expr:"channel_id" json:"channel_id"`
+	GuildID   string `expr:"guild_id" json:"guild_id"`
+}
+
+func (m *MessageEnv) String() string {
+	if m == nil {
+		return ""
+	}
+	return m.Content
+}
+
+func NewMessageEnv(msg discord.Message) *MessageEnv {
+	return &MessageEnv{
+		ID:        msg.ID.String(),
+		Content:   msg.Content,
+		ChannelID: msg.ChannelID.String(),
+		GuildID:   msg.GuildID.String(),
+	}
+}
+
+type EmojiEnv struct {
+	ID       string `expr:"id" json:"id"`
+	Name     string `expr:"name" json:"name"`
+	Animated bool   `expr:"animated" json:"animated"`
+}
+
+func (e *EmojiEnv) String() string {
+	if e == nil {
+		return ""
+	}
+	if e.ID != "" && e.ID != "0" {
+		if e.Animated {
+			return "<a:" + e.Name + ":" + e.ID + ">"
+		}
+		return "<:" + e.Name + ":" + e.ID + ">"
+	}
+	return e.Name
+}
+
+func NewEmojiEnv(emoji discord.Emoji) *EmojiEnv {
+	return &EmojiEnv{
+		ID:       emoji.ID.String(),
+		Name:     emoji.Name,
+		Animated: emoji.Animated,
+	}
+}
+
+type EventEnv struct {
+	Type    string      `expr:"type" json:"type"`
+	User    any         `expr:"user" json:"user"`
+	Member  any         `expr:"member" json:"member"`
+	Channel *ChannelEnv `expr:"channel" json:"channel"`
+	Guild   *GuildEnv   `expr:"guild" json:"guild"`
+	Message *MessageEnv `expr:"message" json:"message"`
+	Emoji   *EmojiEnv   `expr:"emoji" json:"emoji"`
+}
+
+func NewEventEnv(event gateway.Event, session *state.State) *EventEnv {
+	env := &EventEnv{}
+
+	switch e := event.(type) {
+	case *gateway.MessageCreateEvent:
+		env.Type = "message_create"
+		if e.Member != nil {
+			mEnv := NewMemberEnv(*e.Member)
+			env.Member = mEnv
+			env.User = mEnv.User
+		} else {
+			uEnv := NewUserEnv(e.Author)
+			env.User = uEnv
+			env.Member = uEnv
+		}
+		if session != nil && e.ChannelID != 0 {
+			if ch, err := session.Channel(e.ChannelID); err == nil && ch != nil {
+				env.Channel = NewChannelEnv(*ch)
+			}
+		}
+		if env.Channel == nil {
+			env.Channel = &ChannelEnv{ID: e.ChannelID.String()}
+		}
+		if session != nil && e.GuildID != 0 {
+			if g, err := session.Guild(e.GuildID); err == nil && g != nil {
+				env.Guild = NewGuildEnv(*g)
+			}
+		}
+		env.Message = NewMessageEnv(e.Message)
+
+	case *gateway.MessageUpdateEvent:
+		env.Type = "message_update"
+		if e.Member != nil {
+			mEnv := NewMemberEnv(*e.Member)
+			env.Member = mEnv
+			env.User = mEnv.User
+		} else if e.Author.ID.IsValid() {
+			uEnv := NewUserEnv(e.Author)
+			env.User = uEnv
+			env.Member = uEnv
+		}
+		if session != nil && e.ChannelID != 0 {
+			if ch, err := session.Channel(e.ChannelID); err == nil && ch != nil {
+				env.Channel = NewChannelEnv(*ch)
+			}
+		}
+		if env.Channel == nil {
+			env.Channel = &ChannelEnv{ID: e.ChannelID.String()}
+		}
+		if session != nil && e.GuildID != 0 {
+			if g, err := session.Guild(e.GuildID); err == nil && g != nil {
+				env.Guild = NewGuildEnv(*g)
+			}
+		}
+		env.Message = NewMessageEnv(e.Message)
+
+	case *gateway.MessageDeleteEvent:
+		env.Type = "message_delete"
+		env.Message = &MessageEnv{
+			ID:        e.ID.String(),
+			ChannelID: e.ChannelID.String(),
+			GuildID:   e.GuildID.String(),
+		}
+		if session != nil && e.ChannelID != 0 {
+			if ch, err := session.Channel(e.ChannelID); err == nil && ch != nil {
+				env.Channel = NewChannelEnv(*ch)
+			}
+		}
+		if env.Channel == nil {
+			env.Channel = &ChannelEnv{ID: e.ChannelID.String()}
+		}
+		if session != nil && e.GuildID != 0 {
+			if g, err := session.Guild(e.GuildID); err == nil && g != nil {
+				env.Guild = NewGuildEnv(*g)
+			}
+		}
+
+	case *gateway.GuildMemberAddEvent:
+		env.Type = "guild_member_add"
+		mEnv := NewMemberEnv(e.Member)
+		env.Member = mEnv
+		env.User = mEnv.User
+		if session != nil && e.GuildID != 0 {
+			if g, err := session.Guild(e.GuildID); err == nil && g != nil {
+				env.Guild = NewGuildEnv(*g)
+			}
+		}
+
+	case *gateway.GuildMemberRemoveEvent:
+		env.Type = "guild_member_remove"
+		uEnv := NewUserEnv(e.User)
+		env.User = uEnv
+		env.Member = uEnv
+		if session != nil && e.GuildID != 0 {
+			if g, err := session.Guild(e.GuildID); err == nil && g != nil {
+				env.Guild = NewGuildEnv(*g)
+			}
+		}
+
+	case *gateway.MessageReactionAddEvent:
+		env.Type = "message_reaction_add"
+		if e.Member != nil {
+			mEnv := NewMemberEnv(*e.Member)
+			env.Member = mEnv
+			env.User = mEnv.User
+		} else {
+			env.User = &UserEnv{ID: e.UserID.String()}
+			env.Member = env.User
+		}
+		if session != nil && e.ChannelID != 0 {
+			if ch, err := session.Channel(e.ChannelID); err == nil && ch != nil {
+				env.Channel = NewChannelEnv(*ch)
+			}
+		}
+		if env.Channel == nil {
+			env.Channel = &ChannelEnv{ID: e.ChannelID.String()}
+		}
+		if session != nil && e.GuildID != 0 {
+			if g, err := session.Guild(e.GuildID); err == nil && g != nil {
+				env.Guild = NewGuildEnv(*g)
+			}
+		}
+		env.Message = &MessageEnv{
+			ID:        e.MessageID.String(),
+			ChannelID: e.ChannelID.String(),
+			GuildID:   e.GuildID.String(),
+		}
+		env.Emoji = NewEmojiEnv(e.Emoji)
+
+	case *gateway.MessageReactionRemoveEvent:
+		env.Type = "message_reaction_remove"
+		env.User = &UserEnv{ID: e.UserID.String()}
+		env.Member = env.User
+		if session != nil && e.ChannelID != 0 {
+			if ch, err := session.Channel(e.ChannelID); err == nil && ch != nil {
+				env.Channel = NewChannelEnv(*ch)
+			}
+		}
+		if env.Channel == nil {
+			env.Channel = &ChannelEnv{ID: e.ChannelID.String()}
+		}
+		if session != nil && e.GuildID != 0 {
+			if g, err := session.Guild(e.GuildID); err == nil && g != nil {
+				env.Guild = NewGuildEnv(*g)
+			}
+		}
+		env.Message = &MessageEnv{
+			ID:        e.MessageID.String(),
+			ChannelID: e.ChannelID.String(),
+			GuildID:   e.GuildID.String(),
+		}
+		env.Emoji = NewEmojiEnv(e.Emoji)
+	}
+
+	return env
+}
+
+func NewContextFromGatewayEvent(event gateway.Event, session *state.State) Context {
+	eventEnv := NewEventEnv(event, session)
+	return Context{
+		Env: Env{
+			"event":   eventEnv,
+			"user":    eventEnv.User,
+			"member":  eventEnv.Member,
+			"channel": eventEnv.Channel,
+			"guild":   eventEnv.Guild,
+			"server":  eventEnv.Guild,
+			"message": eventEnv.Message,
+			"emoji":   eventEnv.Emoji,
 		},
 	}
 }

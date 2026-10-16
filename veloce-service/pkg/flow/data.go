@@ -88,6 +88,7 @@ type FlowNodeData struct {
 	// General
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
+	EventType   string `json:"event_type,omitempty"`
 
 	// Command Options
 	CommandArgumentType     CommandArgumentType     `json:"command_argument_type,omitempty"`

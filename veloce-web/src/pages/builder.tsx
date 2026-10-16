@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Activity,
   Server,
+  Zap,
 } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -31,7 +32,16 @@ import { BlockPalette } from "@/components/flow/BlockPalette";
 import { BlockInspector } from "@/components/flow/BlockInspector";
 import { ExecutionLogsModal } from "@/components/telemetry/ExecutionLogsModal";
 import { GuildsModal } from "@/components/telemetry/GuildsModal";
-import { api, App, Command, FlowNodeType, FlowNodeData, FlowData, GatewayStatus } from "@/lib/api";
+import {
+  api,
+  App,
+  Command,
+  EventListener,
+  FlowNodeType,
+  FlowNodeData,
+  FlowData,
+  GatewayStatus,
+} from "@/lib/api";
 
 const defaultInitialNodes: Node[] = [
   {
@@ -73,12 +83,17 @@ export default function BuilderPage() {
   const queryClient = useQueryClient();
   const { app: queryAppId, cmd: queryCmdId } = router.query;
 
+  const [mode, setMode] = useState<"command" | "event">("command");
   const [selectedAppId, setSelectedAppId] = useState<string>("");
   const [selectedCmdId, setSelectedCmdId] = useState<string>("");
+  const [selectedEventId, setSelectedEventId] = useState<string>("");
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [createModalTab, setCreateModalTab] = useState<"command" | "event">("command");
   const [newCmdName, setNewCmdName] = useState("");
   const [newCmdDesc, setNewCmdDesc] = useState("");
+  const [newEventType, setNewEventType] = useState("message_create");
+  const [newEventDesc, setNewEventDesc] = useState("");
   const [logsModalOpen, setLogsModalOpen] = useState(false);
   const [guildsModalOpen, setGuildsModalOpen] = useState(false);
 
@@ -121,6 +136,17 @@ export default function BuilderPage() {
     enabled: !!selectedAppId,
   });
 
+  // 3. Fetch event listeners for selected app
+  const {
+    data: eventListeners,
+    isLoading: eventsLoading,
+    refetch: refetchEvents,
+  } = useQuery<EventListener[]>({
+    queryKey: ["events-list", selectedAppId],
+    queryFn: () => (selectedAppId ? api.listEventListeners(selectedAppId) : Promise.resolve([])),
+    enabled: !!selectedAppId,
+  });
+
   // Select command
   useEffect(() => {
     if (commands && commands.length > 0) {
@@ -134,21 +160,34 @@ export default function BuilderPage() {
     }
   }, [commands, queryCmdId]);
 
-  // Active command object
+  // Select event listener
+  useEffect(() => {
+    if (eventListeners && eventListeners.length > 0) {
+      if (!eventListeners.some((e) => e.id === selectedEventId)) {
+        setSelectedEventId(eventListeners[0].id);
+      }
+    } else {
+      setSelectedEventId("");
+    }
+  }, [eventListeners]);
+
+  // Active item objects
   const activeCommand = commands?.find((c) => c.id === selectedCmdId);
+  const activeEventListener = eventListeners?.find((e) => e.id === selectedEventId);
   const activeApp = apps?.find((a) => a.id === selectedAppId);
 
-  // Load flow data when activeCommand changes
+  // Load flow data when active item changes
   useEffect(() => {
-    if (activeCommand && activeCommand.flow_source?.nodes?.length > 0) {
-      const formattedNodes: Node[] = activeCommand.flow_source.nodes.map((n) => ({
+    const activeItem = mode === "command" ? activeCommand : activeEventListener;
+    if (activeItem && activeItem.flow_source?.nodes?.length > 0) {
+      const formattedNodes: Node[] = activeItem.flow_source.nodes.map((n) => ({
         id: n.id,
         type: n.type,
         position: n.position || { x: 200, y: 200 },
         data: { data: n.data },
       }));
 
-      const formattedEdges: Edge[] = (activeCommand.flow_source.edges || []).map((e) => ({
+      const formattedEdges: Edge[] = (activeItem.flow_source.edges || []).map((e) => ({
         id: e.id,
         source: e.source,
         target: e.target,
@@ -170,7 +209,7 @@ export default function BuilderPage() {
       setEdges(formattedEdges);
       setSelectedNode(null);
     }
-  }, [selectedCmdId]);
+  }, [mode, selectedCmdId, selectedEventId]);
 
   // Edge connection handler
   const onConnect = useCallback(
@@ -249,9 +288,16 @@ export default function BuilderPage() {
       position: { x: 300 + Math.random() * 50, y: 200 + Math.random() * 50 },
       data: {
         data: {
-          name: type === "entry_command" ? "custom" : undefined,
-          description: type === "entry_command" ? "A custom slash command" : undefined,
+          name: type === "entry_command" ? "custom" : type === "entry_event" ? "message_create" : undefined,
+          event_type: type === "entry_event" ? "message_create" : undefined,
+          description:
+            type === "entry_command"
+              ? "A custom slash command"
+              : type === "entry_event"
+              ? "Trigger on message create"
+              : undefined,
           response_content: type === "action_response_create" ? "Response message" : undefined,
+          message_content: type === "action_message_create" ? "Message content" : undefined,
           condition_expression: type === "control_branch" ? "true" : undefined,
           delay_seconds: type === "control_delay" ? 2 : undefined,
           variable_name: type === "action_variable_set" ? "my_var" : undefined,
@@ -289,9 +335,16 @@ export default function BuilderPage() {
         position,
         data: {
           data: {
-            name: type === "entry_command" ? "custom" : undefined,
-            description: type === "entry_command" ? "A custom slash command" : undefined,
+            name: type === "entry_command" ? "custom" : type === "entry_event" ? "message_create" : undefined,
+            event_type: type === "entry_event" ? "message_create" : undefined,
+            description:
+              type === "entry_command"
+                ? "A custom slash command"
+                : type === "entry_event"
+                ? "Trigger on message create"
+                : undefined,
             response_content: type === "action_response_create" ? "Response message" : undefined,
+            message_content: type === "action_message_create" ? "Message content" : undefined,
             condition_expression: type === "control_branch" ? "true" : undefined,
             delay_seconds: type === "control_delay" ? 2 : undefined,
             variable_name: type === "action_variable_set" ? "my_var" : undefined,
@@ -306,12 +359,10 @@ export default function BuilderPage() {
     [setNodes]
   );
 
-  // 3. Save Mutation
+  // 3. Save Mutation (Command or Event)
   const saveMutation = useMutation({
     mutationFn: async () => {
-      if (!selectedAppId || !selectedCmdId) {
-        throw new Error("No active command selected to save");
-      }
+      if (!selectedAppId) throw new Error("No app selected");
 
       const flowSource: FlowData = {
         nodes: nodes.map((n) => ({
@@ -329,21 +380,39 @@ export default function BuilderPage() {
         })),
       };
 
-      // Extract command name & description from entry node
-      const entry = nodes.find((n) => n.type === "entry_command");
-      const entryData = (entry?.data as any)?.data as FlowNodeData | undefined;
-      const name = entryData?.name || activeCommand?.name || "command";
-      const description = entryData?.description || activeCommand?.description || "";
+      if (mode === "command") {
+        if (!selectedCmdId) throw new Error("No active command selected to save");
+        const entry = nodes.find((n) => n.type === "entry_command");
+        const entryData = (entry?.data as any)?.data as FlowNodeData | undefined;
+        const name = entryData?.name || activeCommand?.name || "command";
+        const description = entryData?.description || activeCommand?.description || "";
 
-      return api.updateCommand(selectedAppId, selectedCmdId, {
-        name,
-        description,
-        flow_source: flowSource,
-      });
+        return api.updateCommand(selectedAppId, selectedCmdId, {
+          name,
+          description,
+          flow_source: flowSource,
+        });
+      } else {
+        if (!selectedEventId) throw new Error("No active event listener selected to save");
+        const entry = nodes.find((n) => n.type === "entry_event");
+        const entryData = (entry?.data as any)?.data as FlowNodeData | undefined;
+        const eventType = entryData?.event_type || activeEventListener?.type || "message_create";
+        const description = entryData?.description || activeEventListener?.description || "";
+
+        return api.updateEventListener(selectedAppId, selectedEventId, {
+          type: eventType,
+          description,
+          flow_source: flowSource,
+        });
+      }
     },
     onSuccess: () => {
       toast.success("Flow saved successfully!");
-      queryClient.invalidateQueries({ queryKey: ["commands-list", selectedAppId] });
+      if (mode === "command") {
+        queryClient.invalidateQueries({ queryKey: ["commands-list", selectedAppId] });
+      } else {
+        queryClient.invalidateQueries({ queryKey: ["events-list", selectedAppId] });
+      }
     },
     onError: (err: any) => {
       toast.error(err.message || "Failed to save flow");
@@ -364,74 +433,134 @@ export default function BuilderPage() {
     },
   });
 
-  // 5. Create Command Mutation
-  const createCmdMutation = useMutation({
+  // 5. Create Item Mutation (Command or Event)
+  const createItemMutation = useMutation({
     mutationFn: async () => {
       if (!selectedAppId) throw new Error("Select an application first");
-      const cleanName = newCmdName.toLowerCase().replace(/[^a-z0-9_-]/g, "");
-      if (!cleanName) throw new Error("Valid command name is required");
 
-      const initialSource: FlowData = {
-        nodes: [
-          {
-            id: `node_entry_${Date.now()}`,
-            type: "entry_command",
-            data: {
-              name: cleanName,
-              description: newCmdDesc || "Slash command created in Veloce",
-            },
-            position: { x: 250, y: 100 },
-          },
-          {
-            id: `node_reply_${Date.now() + 1}`,
-            type: "action_response_create",
-            data: {
-              response_content: `Hello from /${cleanName}!`,
-              response_ephemeral: false,
-            },
-            position: { x: 250, y: 280 },
-          },
-        ],
-        edges: [
-          {
-            id: `edge_${Date.now()}`,
-            source: `node_entry_${Date.now()}`,
-            target: `node_reply_${Date.now() + 1}`,
-            sourceHandle: "default",
-          },
-        ],
-      };
+      if (createModalTab === "command") {
+        const cleanName = newCmdName.toLowerCase().replace(/[^a-z0-9_-]/g, "");
+        if (!cleanName) throw new Error("Valid command name is required");
 
-      return api.createCommand(selectedAppId, {
-        name: cleanName,
-        description: newCmdDesc || "Custom slash command",
-        flow_source: initialSource,
-      });
+        const initialSource: FlowData = {
+          nodes: [
+            {
+              id: `node_entry_${Date.now()}`,
+              type: "entry_command",
+              data: {
+                name: cleanName,
+                description: newCmdDesc || "Slash command created in Veloce",
+              },
+              position: { x: 250, y: 100 },
+            },
+            {
+              id: `node_reply_${Date.now() + 1}`,
+              type: "action_response_create",
+              data: {
+                response_content: `Hello from /${cleanName}!`,
+                response_ephemeral: false,
+              },
+              position: { x: 250, y: 280 },
+            },
+          ],
+          edges: [
+            {
+              id: `edge_${Date.now()}`,
+              source: `node_entry_${Date.now()}`,
+              target: `node_reply_${Date.now() + 1}`,
+              sourceHandle: "default",
+            },
+          ],
+        };
+
+        return api.createCommand(selectedAppId, {
+          name: cleanName,
+          description: newCmdDesc || "Custom slash command",
+          flow_source: initialSource,
+        });
+      } else {
+        const initialSource: FlowData = {
+          nodes: [
+            {
+              id: `node_entry_${Date.now()}`,
+              type: "entry_event",
+              data: {
+                name: newEventType,
+                event_type: newEventType,
+                description: newEventDesc || "Event listener created in Veloce",
+              },
+              position: { x: 250, y: 100 },
+            },
+            {
+              id: `node_msg_${Date.now() + 1}`,
+              type: "action_message_create",
+              data: {
+                message_content: `Event ${newEventType} received!`,
+              },
+              position: { x: 250, y: 280 },
+            },
+          ],
+          edges: [
+            {
+              id: `edge_${Date.now()}`,
+              source: `node_entry_${Date.now()}`,
+              target: `node_msg_${Date.now() + 1}`,
+              sourceHandle: "default",
+            },
+          ],
+        };
+
+        return api.createEventListener(selectedAppId, {
+          type: newEventType,
+          description: newEventDesc || "Custom event listener",
+          flow_source: initialSource,
+        });
+      }
     },
-    onSuccess: (newCmd) => {
-      toast.success(`Command /${newCmd.name} created!`);
-      setNewCmdName("");
-      setNewCmdDesc("");
+    onSuccess: (newItem: any) => {
+      if (createModalTab === "command") {
+        toast.success(`Command /${newItem.name} created!`);
+        setNewCmdName("");
+        setNewCmdDesc("");
+        setMode("command");
+        setSelectedCmdId(newItem.id);
+        queryClient.invalidateQueries({ queryKey: ["commands-list", selectedAppId] });
+      } else {
+        toast.success(`Event listener (${newItem.type}) created!`);
+        setNewEventDesc("");
+        setMode("event");
+        setSelectedEventId(newItem.id);
+        queryClient.invalidateQueries({ queryKey: ["events-list", selectedAppId] });
+      }
       setCreateModalOpen(false);
-      queryClient.invalidateQueries({ queryKey: ["commands-list", selectedAppId] });
-      setSelectedCmdId(newCmd.id);
     },
     onError: (err: any) => {
-      toast.error(err.message || "Failed to create command");
+      toast.error(err.message || "Failed to create item");
     },
   });
 
-  // 6. Delete Command Mutation
-  const deleteCmdMutation = useMutation({
-    mutationFn: async (cmdId: string) => {
-      return api.deleteCommand(selectedAppId, cmdId);
+  // 6. Delete Item Mutation
+  const deleteItemMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedAppId) return;
+      if (mode === "command") {
+        if (!selectedCmdId) return;
+        return api.deleteCommand(selectedAppId, selectedCmdId);
+      } else {
+        if (!selectedEventId) return;
+        return api.deleteEventListener(selectedAppId, selectedEventId);
+      }
     },
     onSuccess: () => {
-      toast.success("Command deleted");
-      queryClient.invalidateQueries({ queryKey: ["commands-list", selectedAppId] });
+      toast.success(mode === "command" ? "Command deleted" : "Event listener deleted");
+      if (mode === "command") {
+        queryClient.invalidateQueries({ queryKey: ["commands-list", selectedAppId] });
+      } else {
+        queryClient.invalidateQueries({ queryKey: ["events-list", selectedAppId] });
+      }
     },
     onError: (err: any) => {
-      toast.error(err.message || "Failed to delete command");
+      toast.error(err.message || "Failed to delete item");
     },
   });
 
@@ -439,7 +568,13 @@ export default function BuilderPage() {
     <>
       <Head>
         <title>
-          {activeCommand ? `/${activeCommand.name} - Flow Builder` : "Flow Builder - Veloce"}
+          {mode === "command"
+            ? activeCommand
+              ? `/${activeCommand.name} - Flow Builder`
+              : "Flow Builder - Veloce"
+            : activeEventListener
+            ? `${activeEventListener.type} - Flow Builder`
+            : "Flow Builder - Veloce"}
         </title>
       </Head>
 
@@ -480,47 +615,124 @@ export default function BuilderPage() {
 
             <div className="h-4 w-px bg-slate-800" />
 
-            {/* Command Selector */}
-            <div className="flex items-center gap-2">
-              <Terminal className="w-4 h-4 text-emerald-400" />
-              <select
-                value={selectedCmdId}
-                onChange={(e) => setSelectedCmdId(e.target.value)}
-                disabled={!commands || commands.length === 0}
-                className="bg-slate-950 border border-slate-800 text-xs font-mono font-medium rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
-              >
-                {commandsLoading ? (
-                  <option>Loading commands...</option>
-                ) : !commands || commands.length === 0 ? (
-                  <option value="">No commands (Click + New)</option>
-                ) : (
-                  commands.map((cmd) => (
-                    <option key={cmd.id} value={cmd.id}>
-                      /{cmd.name}
-                    </option>
-                  ))
-                )}
-              </select>
-
+            {/* Mode Switch: Commands vs Events */}
+            <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5">
               <button
-                onClick={() => setCreateModalOpen(true)}
-                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
-                title="Create New Command"
+                onClick={() => setMode("command")}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition ${
+                  mode === "command"
+                    ? "bg-slate-800 text-emerald-400 shadow-sm"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
               >
-                <Plus className="w-3.5 h-3.5" />
+                <Terminal className="w-3.5 h-3.5" />
+                Commands
               </button>
-
-              {activeCommand && (
-                <button
-                  onClick={() => deleteCmdMutation.mutate(activeCommand.id)}
-                  disabled={deleteCmdMutation.isPending}
-                  className="p-1.5 rounded-lg hover:bg-rose-500/10 text-slate-400 hover:text-rose-400 border border-transparent hover:border-rose-500/30 transition"
-                  title="Delete this command"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              )}
+              <button
+                onClick={() => setMode("event")}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition ${
+                  mode === "event"
+                    ? "bg-slate-800 text-amber-400 shadow-sm"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5" />
+                Events
+              </button>
             </div>
+
+            <div className="h-4 w-px bg-slate-800" />
+
+            {/* Item Selector (Command or Event) */}
+            {mode === "command" ? (
+              <div className="flex items-center gap-2">
+                <Terminal className="w-4 h-4 text-emerald-400" />
+                <select
+                  value={selectedCmdId}
+                  onChange={(e) => setSelectedCmdId(e.target.value)}
+                  disabled={!commands || commands.length === 0}
+                  className="bg-slate-950 border border-slate-800 text-xs font-mono font-medium rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+                >
+                  {commandsLoading ? (
+                    <option>Loading commands...</option>
+                  ) : !commands || commands.length === 0 ? (
+                    <option value="">No commands (Click + New)</option>
+                  ) : (
+                    commands.map((cmd) => (
+                      <option key={cmd.id} value={cmd.id}>
+                        /{cmd.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+
+                <button
+                  onClick={() => {
+                    setCreateModalTab("command");
+                    setCreateModalOpen(true);
+                  }}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
+                  title="Create New Command"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+
+                {activeCommand && (
+                  <button
+                    onClick={() => deleteItemMutation.mutate()}
+                    disabled={deleteItemMutation.isPending}
+                    className="p-1.5 rounded-lg hover:bg-rose-500/10 text-slate-400 hover:text-rose-400 border border-transparent hover:border-rose-500/30 transition"
+                    title="Delete this command"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Zap className="w-4 h-4 text-amber-400" />
+                <select
+                  value={selectedEventId}
+                  onChange={(e) => setSelectedEventId(e.target.value)}
+                  disabled={!eventListeners || eventListeners.length === 0}
+                  className="bg-slate-950 border border-slate-800 text-xs font-mono font-medium rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none focus:border-amber-500 disabled:opacity-50"
+                >
+                  {eventsLoading ? (
+                    <option>Loading events...</option>
+                  ) : !eventListeners || eventListeners.length === 0 ? (
+                    <option value="">No events (Click + New)</option>
+                  ) : (
+                    eventListeners.map((ev) => (
+                      <option key={ev.id} value={ev.id}>
+                        {ev.type} ({ev.description || "listener"})
+                      </option>
+                    ))
+                  )}
+                </select>
+
+                <button
+                  onClick={() => {
+                    setCreateModalTab("event");
+                    setCreateModalOpen(true);
+                  }}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
+                  title="Create New Event Listener"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+
+                {activeEventListener && (
+                  <button
+                    onClick={() => deleteItemMutation.mutate()}
+                    disabled={deleteItemMutation.isPending}
+                    className="p-1.5 rounded-lg hover:bg-rose-500/10 text-slate-400 hover:text-rose-400 border border-transparent hover:border-rose-500/30 transition"
+                    title="Delete this event listener"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Action Buttons */}
@@ -566,7 +778,9 @@ export default function BuilderPage() {
 
             <button
               onClick={() => saveMutation.mutate()}
-              disabled={saveMutation.isPending || !selectedCmdId}
+              disabled={
+                saveMutation.isPending || (mode === "command" ? !selectedCmdId : !selectedEventId)
+              }
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 disabled:opacity-50 transition shadow-sm"
             >
               {saveMutation.isPending ? (
@@ -619,67 +833,152 @@ export default function BuilderPage() {
           />
         </div>
 
-        {/* Create Command Modal */}
+        {/* Create Item Modal */}
         {createModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
             <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl relative">
-              <div className="flex items-center gap-2 text-emerald-400 mb-2">
-                <Terminal className="w-5 h-5" />
-                <h3 className="text-lg font-bold text-slate-100">Create Slash Command</h3>
+              {/* Tabs */}
+              <div className="flex items-center gap-2 mb-4 p-1 bg-slate-950 border border-slate-800 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setCreateModalTab("command")}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold transition ${
+                    createModalTab === "command"
+                      ? "bg-slate-800 text-emerald-400 shadow-sm"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <Terminal className="w-4 h-4" />
+                  Slash Command
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCreateModalTab("event")}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold transition ${
+                    createModalTab === "event"
+                      ? "bg-slate-800 text-amber-400 shadow-sm"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <Zap className="w-4 h-4" />
+                  Event Listener
+                </button>
               </div>
-              <p className="text-xs text-slate-400 mb-6">
-                Add a new Discord slash command to this application and design its visual execution graph.
-              </p>
 
-              <div className="space-y-4 text-xs">
-                <div>
-                  <label className="text-slate-300 font-medium block mb-1.5">
-                    Command Name <span className="text-rose-400">*</span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-3 top-2 text-slate-500 font-mono">/</span>
-                    <input
-                      type="text"
-                      placeholder="ban, info, rank, etc."
-                      value={newCmdName}
-                      onChange={(e) =>
-                        setNewCmdName(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))
-                      }
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-6 pr-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-emerald-500 font-mono"
-                    />
+              {createModalTab === "command" ? (
+                <>
+                  <p className="text-xs text-slate-400 mb-6">
+                    Add a new Discord slash command to this application and design its visual execution graph.
+                  </p>
+
+                  <div className="space-y-4 text-xs">
+                    <div>
+                      <label className="text-slate-300 font-medium block mb-1.5">
+                        Command Name <span className="text-rose-400">*</span>
+                      </label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-2 text-slate-500 font-mono">/</span>
+                        <input
+                          type="text"
+                          placeholder="ban, info, rank, etc."
+                          value={newCmdName}
+                          onChange={(e) =>
+                            setNewCmdName(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))
+                          }
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-6 pr-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-emerald-500 font-mono"
+                        />
+                      </div>
+                      <p className="text-[10px] text-slate-500 mt-1">Lowercase letters, numbers, and dashes.</p>
+                    </div>
+
+                    <div>
+                      <label className="text-slate-300 font-medium block mb-1.5">Description</label>
+                      <input
+                        type="text"
+                        placeholder="Brief description shown to Discord users"
+                        value={newCmdDesc}
+                        onChange={(e) => setNewCmdDesc(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
                   </div>
-                  <p className="text-[10px] text-slate-500 mt-1">Lowercase letters, numbers, and dashes.</p>
-                </div>
 
-                <div>
-                  <label className="text-slate-300 font-medium block mb-1.5">Description</label>
-                  <input
-                    type="text"
-                    placeholder="Brief description shown to Discord users"
-                    value={newCmdDesc}
-                    onChange={(e) => setNewCmdDesc(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-              </div>
+                  <div className="mt-8 flex items-center justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setCreateModalOpen(false)}
+                      className="px-4 py-2 text-xs font-medium rounded-lg text-slate-400 hover:text-slate-200 transition"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!newCmdName.trim() || createItemMutation.isPending}
+                      onClick={() => createItemMutation.mutate()}
+                      className="px-4 py-2 text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white shadow transition flex items-center gap-1.5"
+                    >
+                      {createItemMutation.isPending ? "Creating..." : "Create Command"}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs text-slate-400 mb-6">
+                    Trigger visual flows automatically whenever Discord gateway events occur.
+                  </p>
 
-              <div className="mt-8 flex items-center justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setCreateModalOpen(false)}
-                  className="px-4 py-2 text-xs font-medium rounded-lg text-slate-400 hover:text-slate-200 transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={!newCmdName.trim() || createCmdMutation.isPending}
-                  onClick={() => createCmdMutation.mutate()}
-                  className="px-4 py-2 text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white shadow transition flex items-center gap-1.5"
-                >
-                  {createCmdMutation.isPending ? "Creating..." : "Create Command"}
-                </button>
-              </div>
+                  <div className="space-y-4 text-xs">
+                    <div>
+                      <label className="text-slate-300 font-medium block mb-1.5">
+                        Gateway Event Type <span className="text-rose-400">*</span>
+                      </label>
+                      <select
+                        value={newEventType}
+                        onChange={(e) => setNewEventType(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono focus:outline-none focus:border-amber-500"
+                      >
+                        <option value="message_create">message_create (New Message)</option>
+                        <option value="message_update">message_update (Edited Message)</option>
+                        <option value="message_delete">message_delete (Deleted Message)</option>
+                        <option value="guild_member_add">guild_member_add (Member Joined)</option>
+                        <option value="guild_member_remove">guild_member_remove (Member Left)</option>
+                        <option value="message_reaction_add">message_reaction_add (Reaction Added)</option>
+                        <option value="message_reaction_remove">message_reaction_remove (Reaction Removed)</option>
+                        <option value="guild_boost">guild_boost (Server Boosted)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-slate-300 font-medium block mb-1.5">Description</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Welcome new members with a channel message"
+                        value={newEventDesc}
+                        onChange={(e) => setNewEventDesc(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-amber-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-8 flex items-center justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setCreateModalOpen(false)}
+                      className="px-4 py-2 text-xs font-medium rounded-lg text-slate-400 hover:text-slate-200 transition"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={createItemMutation.isPending}
+                      onClick={() => createItemMutation.mutate()}
+                      className="px-4 py-2 text-xs font-medium rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white shadow transition flex items-center gap-1.5"
+                    >
+                      {createItemMutation.isPending ? "Creating..." : "Create Listener"}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}

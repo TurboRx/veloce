@@ -62,7 +62,45 @@ func CompileCommand(data FlowData) (*CompiledFlowNode, error) {
 		return nil, fmt.Errorf("invalid command name '%s': must be 1-32 lowercase characters, numbers, or dashes/underscores", entryNode.Data.Name)
 	}
 
-	// Link edges
+	linkEdges(data, nodeMap)
+	return entryNode, nil
+}
+
+func CompileEventListener(data FlowData) (*CompiledFlowNode, error) {
+	if len(data.Nodes) == 0 {
+		return nil, errors.New("cannot compile empty flow: no nodes found")
+	}
+
+	var entryNode *CompiledFlowNode
+	nodeMap := make(map[string]*CompiledFlowNode, len(data.Nodes))
+
+	for _, n := range data.Nodes {
+		compiled := &CompiledFlowNode{
+			ID:       n.ID,
+			Type:     n.Type,
+			Data:     n.Data,
+			Parents:  newConnectedFlowNodes(),
+			Children: newConnectedFlowNodes(),
+		}
+		nodeMap[n.ID] = compiled
+
+		if n.Type == FlowNodeTypeEntryEvent {
+			if entryNode != nil {
+				return nil, errors.New("flow cannot have multiple event entry nodes")
+			}
+			entryNode = compiled
+		}
+	}
+
+	if entryNode == nil {
+		return nil, errors.New("flow must contain an entry_event node")
+	}
+
+	linkEdges(data, nodeMap)
+	return entryNode, nil
+}
+
+func linkEdges(data FlowData, nodeMap map[string]*CompiledFlowNode) {
 	for _, edge := range data.Edges {
 		parent, ok := nodeMap[edge.Source]
 		if !ok {
@@ -85,8 +123,6 @@ func CompileCommand(data FlowData) (*CompiledFlowNode, error) {
 			child.Parents.Handles[edge.TargetHandle] = append(child.Parents.Handles[edge.TargetHandle], parent)
 		}
 	}
-
-	return entryNode, nil
 }
 
 func (n *CompiledFlowNode) CommandData() api.CreateCommandData {
