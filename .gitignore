@@ -36,3 +36,8 @@ data/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Cloudflare Workers
+.dev.vars*
+.wrangler/
+
