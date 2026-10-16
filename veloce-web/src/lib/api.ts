@@ -1,5 +1,16 @@
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
+export function getApiUrl(path?: string): string {
+  let baseUrl = API_BASE;
+  if (!baseUrl && typeof window !== "undefined") {
+    baseUrl = window.location.origin;
+  }
+  if (!path) return baseUrl;
+  return baseUrl.replace(/\/$/, "") + path;
+}
+
+export const loginUrl = getApiUrl("/v1/auth/login?redirect=/apps");
+
 export interface User {
   id: string;
   email: string;

@@ -61,6 +61,15 @@ app.get("/v1/user/@me", (c) => {
   });
 });
 
+app.get("/v1/auth/login", (c) => {
+  const redirect = c.req.query("redirect") || "/apps";
+  return c.redirect(redirect);
+});
+
+app.post("/v1/auth/logout", (c) => {
+  return c.json({ status: "logged_out", success: true });
+});
+
 // Discord Interactions Webhook Endpoint
 async function handleDiscordInteraction(c: any) {
   const appId = c.req.param("app_id");

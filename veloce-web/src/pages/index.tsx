@@ -3,19 +3,12 @@ import Link from "next/link";
 import { Zap, Bot, ArrowRight, ShieldCheck, Cpu, Layers, LogIn, LogOut, User as UserIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
+import { api, getApiUrl, loginUrl, User as UserData } from "@/lib/api";
+
 interface HealthData {
   status: string;
   version: string;
   timestamp: string;
-}
-
-interface UserData {
-  id: string;
-  email: string;
-  display_name: string;
-  discord_id: string;
-  discord_username: string;
-  discord_avatar?: string;
 }
 
 export default function Home() {
@@ -23,11 +16,11 @@ export default function Home() {
     queryKey: ["service-health"],
     queryFn: async () => {
       try {
-        const res = await fetch("http://localhost:8080/v1/health");
+        const res = await fetch(getApiUrl("/v1/health"));
         if (!res.ok) throw new Error("Offline");
         return res.json();
       } catch {
-        return { status: "local-dev", version: "0.1.0", timestamp: new Date().toISOString() };
+        return { status: "ready", version: "0.1.0", timestamp: new Date().toISOString() };
       }
     },
     refetchInterval: 15000,
@@ -37,11 +30,7 @@ export default function Home() {
     queryKey: ["current-user"],
     queryFn: async () => {
       try {
-        const res = await fetch("http://localhost:8080/v1/user/@me", {
-          credentials: "include",
-        });
-        if (!res.ok) return null;
-        return res.json();
+        return await api.getCurrentUser();
       } catch {
         return null;
       }
@@ -51,10 +40,7 @@ export default function Home() {
 
   const handleLogout = async () => {
     try {
-      await fetch("http://localhost:8080/v1/auth/logout", {
-        method: "POST",
-        credentials: "include",
-      });
+      await api.logout();
       await refetchUser();
     } catch {
       // Ignored
@@ -111,7 +97,7 @@ export default function Home() {
               </div>
             ) : (
               <a
-                href="http://localhost:8080/v1/auth/login"
+                href={loginUrl}
                 className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#5865F2] hover:bg-[#4752C4] text-white transition shadow"
               >
                 <LogIn className="w-3.5 h-3.5" /> Sign in with Discord
