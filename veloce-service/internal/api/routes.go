@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
+	veloceweb "github.com/TurboRx/veloce/veloce-web"
 	"github.com/gorilla/mux"
 )
 
@@ -15,8 +17,10 @@ type HealthResponse struct {
 }
 
 func (s *Server) registerRoutes(r *mux.Router) {
-	apiV1 := r.PathPrefix("/v1").Subrouter()
+	// Root and API health check
+	r.HandleFunc("/health", s.handleHealth).Methods(http.MethodGet)
 
+	apiV1 := r.PathPrefix("/v1").Subrouter()
 	apiV1.HandleFunc("/health", s.handleHealth).Methods(http.MethodGet)
 
 	// Authentication routes
@@ -53,7 +57,17 @@ func (s *Server) registerRoutes(r *mux.Router) {
 	apiV1.HandleFunc("/apps/{app_id}/logs", RequireAuth(s.handleListLogs)).Methods(http.MethodGet)
 	apiV1.HandleFunc("/apps/{app_id}/gateway", RequireAuth(s.handleGetGatewayStatus)).Methods(http.MethodGet)
 	apiV1.HandleFunc("/apps/{app_id}/guilds", RequireAuth(s.handleListGuilds)).Methods(http.MethodGet)
+
+	// Web frontend static routing (embedded via 'embedweb' tag or served)
+	webHandler, err := veloceweb.NewHandler()
+	if err == nil {
+		slog.Info("Veloce web frontend embedded successfully")
+		r.PathPrefix("/").Handler(webHandler)
+	} else {
+		slog.Info("Veloce web frontend not embedded, set 'embedweb' build tag to embed it")
+	}
 }
+
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := HealthResponse{

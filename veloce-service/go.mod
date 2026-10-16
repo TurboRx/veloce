@@ -14,8 +14,12 @@ require (
 	github.com/matoous/go-nanoid/v2 v2.1.0
 	github.com/rs/cors v1.11.1
 	github.com/urfave/cli/v2 v2.27.6
+	github.com/TurboRx/veloce/veloce-web v0.0.0
 	golang.org/x/oauth2 v0.36.0
 )
+
+replace github.com/TurboRx/veloce/veloce-web => ../veloce-web
+
 
 require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.5 // indirect
