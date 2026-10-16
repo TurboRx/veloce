@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +44,28 @@ func (m *mockCmdStore) UpdateLastDeployed(ctx context.Context, commandIDs []stri
 	return nil
 }
 
+type mockLogStore struct {
+	mu   sync.Mutex
+	logs []*model.Log
+}
+
+func (m *mockLogStore) CreateLog(ctx context.Context, log *model.Log) (*model.Log, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.logs = append(m.logs, log)
+	return log, nil
+}
+
+func (m *mockLogStore) ListLogsByApp(ctx context.Context, appID string, limit, offset int) ([]*model.Log, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.logs, nil
+}
+
+func (m *mockLogStore) DeleteOldLogs(ctx context.Context, olderThan time.Time) error {
+	return nil
+}
+
 func TestInteractionDispatcherMatchingCommand(t *testing.T) {
 	store := &mockCmdStore{
 		commands: make(map[string]*model.Command),
@@ -74,13 +97,16 @@ func TestInteractionDispatcherMatchingCommand(t *testing.T) {
 		FlowSource: validFlow,
 	}
 
-	dispatcher := NewInteractionDispatcher(store)
+	logStore := &mockLogStore{}
+	dispatcher := NewInteractionDispatcher(store, logStore)
 
 	ev := &gateway.InteractionCreateEvent{
 		InteractionEvent: discord.InteractionEvent{
-			ID:    discord.InteractionID(999),
-			AppID: discord.AppID(111),
-			Token: "dummy_token",
+			ID:        discord.InteractionID(999),
+			AppID:     discord.AppID(111),
+			GuildID:   discord.GuildID(777),
+			ChannelID: discord.ChannelID(666),
+			Token:     "dummy_token",
 			User: &discord.User{
 				ID:       discord.UserID(888),
 				Username: "Tester",
@@ -94,6 +120,25 @@ func TestInteractionDispatcherMatchingCommand(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// HandleEvent should execute flow without blocking or panicking
 	dispatcher.HandleEvent(ctx, "app_xyz", nil, ev)
+
+	// Wait briefly for the async log write
+	time.Sleep(100 * time.Millisecond)
+
+	logStore.mu.Lock()
+	defer logStore.mu.Unlock()
+	if len(logStore.logs) != 1 {
+		t.Fatalf("expected 1 log recorded, got %d", len(logStore.logs))
+	}
+
+	recorded := logStore.logs[0]
+	if recorded.Level != model.LogLevelInfo {
+		t.Errorf("expected LogLevelInfo, got %s", recorded.Level)
+	}
+	if recorded.AppID != "app_xyz" {
+		t.Errorf("expected app_xyz, got %s", recorded.AppID)
+	}
+	if recorded.Details["command_name"] != "help" {
+		t.Errorf("expected command_name help, got %v", recorded.Details["command_name"])
+	}
 }

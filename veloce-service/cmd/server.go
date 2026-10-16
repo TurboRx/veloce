@@ -62,15 +62,20 @@ func ServerCmd() *cli.Command {
 			var sessionStore *postgres.PostgresSessionStore
 			var appStore *postgres.PostgresAppStore
 			var commandStore *postgres.PostgresCommandStore
+			var logStore *postgres.PostgresLogStore
 			if dbClient != nil && dbClient.DB != nil {
 				userStore = postgres.NewUserStore(dbClient.DB)
 				sessionStore = postgres.NewSessionStore(dbClient.DB)
 				appStore = postgres.NewAppStore(dbClient.DB)
 				commandStore = postgres.NewCommandStore(dbClient.DB)
+				logStore = postgres.NewLogStore(dbClient.DB)
 			}
 
 			botVerifier := util.NewBotTokenVerifier()
 			server := api.NewServer(cfg, userStore, sessionStore, appStore, commandStore, tokenCrypt, botVerifier)
+			if logStore != nil {
+				server.SetLogStore(logStore)
+			}
 
 			gatewayCtx, cancelGateway := context.WithCancel(context.Background())
 			defer cancelGateway()
@@ -80,7 +85,7 @@ func ServerCmd() *cli.Command {
 				eventRouter.RegisterHandler(&gateway.LoggingEventHandler{})
 
 				if commandStore != nil {
-					dispatcher := engine.NewInteractionDispatcher(commandStore)
+					dispatcher := engine.NewInteractionDispatcher(commandStore, logStore)
 					eventRouter.RegisterHandler(dispatcher)
 				}
 
@@ -95,6 +100,8 @@ func ServerCmd() *cli.Command {
 					},
 				)
 				go gatewayManager.Run(gatewayCtx)
+
+				server.SetGatewayInspector(gatewayManager)
 
 				if commandStore != nil {
 					commandManager := command.NewCommandManager(appStore, commandStore, gatewayManager, tokenCrypt)

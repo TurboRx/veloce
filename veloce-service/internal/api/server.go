@@ -8,22 +8,31 @@ import (
 	"time"
 
 	"github.com/TurboRx/veloce/veloce-service/internal/config"
+	"github.com/TurboRx/veloce/veloce-service/internal/core/gateway"
 	"github.com/TurboRx/veloce/veloce-service/internal/store"
 	"github.com/TurboRx/veloce/veloce-service/internal/util"
+	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 )
 
+type GatewayInspector interface {
+	GetAppStatus(appID string) gateway.GatewayAppStatus
+	ListGuilds(appID string) ([]discord.Guild, error)
+}
+
 type Server struct {
-	config       *config.Config
-	router       *mux.Router
-	http         *http.Server
-	userStore    store.UserStore
-	sessionStore store.SessionStore
-	appStore     store.AppStore
-	commandStore store.CommandStore
-	tokenCrypt   *util.SymmetricCrypt
-	botVerifier  util.BotTokenVerifier
+	config           *config.Config
+	router           *mux.Router
+	http             *http.Server
+	userStore        store.UserStore
+	sessionStore     store.SessionStore
+	appStore         store.AppStore
+	commandStore     store.CommandStore
+	logStore         store.LogStore
+	gatewayInspector GatewayInspector
+	tokenCrypt       *util.SymmetricCrypt
+	botVerifier      util.BotTokenVerifier
 }
 
 func NewServer(
@@ -65,12 +74,9 @@ func NewServer(
 		AllowCredentials: true,
 	})
 
-	handler := c.Handler(LoggingMiddleware(r))
-
-	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	s.http = &http.Server{
-		Addr:         addr,
-		Handler:      handler,
+		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:      c.Handler(r),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -79,18 +85,23 @@ func NewServer(
 	return s
 }
 
+func (s *Server) SetLogStore(ls store.LogStore) {
+	s.logStore = ls
+}
+
+func (s *Server) SetGatewayInspector(gi GatewayInspector) {
+	s.gatewayInspector = gi
+}
+
 func (s *Server) Start() error {
-	slog.Info("Veloce API Server listening",
-		slog.String("addr", s.http.Addr),
-		slog.String("public_url", s.config.Server.PublicBaseURL),
-	)
+	slog.Info("Starting Veloce API HTTP server", slog.Int("port", s.config.Server.Port))
 	if err := s.http.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("http server failed: %w", err)
+		return fmt.Errorf("failed to start server: %w", err)
 	}
 	return nil
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
-	slog.Info("Shutting down API server...")
+	slog.Info("Shutting down Veloce API HTTP server")
 	return s.http.Shutdown(ctx)
 }
