@@ -17,10 +17,12 @@ export interface App {
   description?: string;
   enabled: boolean;
   discord_id: string;
+  discord_public_key?: string;
   discord_avatar?: string;
   created_at: string;
   updated_at: string;
 }
+
 
 export type FlowNodeType =
   | "entry_command"
@@ -161,9 +163,12 @@ export const api = {
   // Apps
   listApps: () => request<App[]>("/v1/apps"),
   getApp: (id: string) => request<App>(`/v1/apps/${id}`),
-  createApp: (data: { token: string; name?: string }) =>
+  createApp: (data: { token: string; name?: string; public_key?: string }) =>
     request<App>("/v1/apps", { method: "POST", body: JSON.stringify(data) }),
+  updateApp: (id: string, data: { name?: string; description?: string; enabled?: boolean; public_key?: string }) =>
+    request<App>(`/v1/apps/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   deleteApp: (id: string) => request<{ success: boolean }>(`/v1/apps/${id}`, { method: "DELETE" }),
+
 
   // Commands
   listCommands: (appId: string) => request<Command[]>(`/v1/apps/${appId}/commands`),

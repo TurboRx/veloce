@@ -35,18 +35,18 @@ func (s *PostgresAppStore) CreateApp(ctx context.Context, app *model.App) (*mode
 	query := `
 		INSERT INTO apps (
 			id, name, description, enabled, owner_user_id, creator_user_id,
-			discord_token, discord_id, discord_avatar, discord_status,
+			discord_token, discord_id, discord_public_key, discord_avatar, discord_status,
 			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id, name, description, enabled, owner_user_id, creator_user_id,
-			discord_token, discord_id, discord_avatar, discord_status,
+			discord_token, discord_id, discord_public_key, discord_avatar, discord_status,
 			commands_deploy_at, commands_deployed_hash, commands_deploy_error,
 			created_at, updated_at
 	`
 
 	row := s.db.QueryRowContext(ctx, query,
 		app.ID, app.Name, app.Description, app.Enabled, app.OwnerUserID, app.CreatorUserID,
-		app.DiscordToken, app.DiscordID, app.DiscordAvatar, app.DiscordStatus,
+		app.DiscordToken, app.DiscordID, app.DiscordPublicKey, app.DiscordAvatar, app.DiscordStatus,
 		now, now,
 	)
 
@@ -57,7 +57,7 @@ func (s *PostgresAppStore) GetAppByID(ctx context.Context, id string) (*model.Ap
 	query := `
 		SELECT 
 			id, name, description, enabled, owner_user_id, creator_user_id,
-			discord_token, discord_id, discord_avatar, discord_status,
+			discord_token, discord_id, discord_public_key, discord_avatar, discord_status,
 			commands_deploy_at, commands_deployed_hash, commands_deploy_error,
 			created_at, updated_at
 		FROM apps
@@ -71,7 +71,7 @@ func (s *PostgresAppStore) GetAppByDiscordID(ctx context.Context, discordID stri
 	query := `
 		SELECT 
 			id, name, description, enabled, owner_user_id, creator_user_id,
-			discord_token, discord_id, discord_avatar, discord_status,
+			discord_token, discord_id, discord_public_key, discord_avatar, discord_status,
 			commands_deploy_at, commands_deployed_hash, commands_deploy_error,
 			created_at, updated_at
 		FROM apps
@@ -85,7 +85,7 @@ func (s *PostgresAppStore) ListAppsByOwner(ctx context.Context, ownerUserID stri
 	query := `
 		SELECT 
 			id, name, description, enabled, owner_user_id, creator_user_id,
-			discord_token, discord_id, discord_avatar, discord_status,
+			discord_token, discord_id, discord_public_key, discord_avatar, discord_status,
 			commands_deploy_at, commands_deployed_hash, commands_deploy_error,
 			created_at, updated_at
 		FROM apps
@@ -101,7 +101,7 @@ func (s *PostgresAppStore) ListAppsByOwner(ctx context.Context, ownerUserID stri
 	var apps []*model.App
 	for rows.Next() {
 		var a model.App
-		var desc, avatar, hash sql.NullString
+		var desc, pubKey, avatar, hash sql.NullString
 		var deployAt sql.NullTime
 		var status, deployError []byte
 
@@ -114,6 +114,7 @@ func (s *PostgresAppStore) ListAppsByOwner(ctx context.Context, ownerUserID stri
 			&a.CreatorUserID,
 			&a.DiscordToken,
 			&a.DiscordID,
+			&pubKey,
 			&avatar,
 			&status,
 			&deployAt,
@@ -129,6 +130,10 @@ func (s *PostgresAppStore) ListAppsByOwner(ctx context.Context, ownerUserID stri
 		if desc.Valid {
 			a.Description = &desc.String
 		}
+		if pubKey.Valid {
+			a.DiscordPublicKey = &pubKey.String
+		}
+
 		if avatar.Valid {
 			a.DiscordAvatar = &avatar.String
 		}
@@ -158,18 +163,19 @@ func (s *PostgresAppStore) UpdateApp(ctx context.Context, app *model.App) (*mode
 			name = $2,
 			description = $3,
 			enabled = $4,
-			discord_avatar = $5,
-			discord_status = $6,
-			updated_at = $7
+			discord_public_key = $5,
+			discord_avatar = $6,
+			discord_status = $7,
+			updated_at = $8
 		WHERE id = $1
 		RETURNING id, name, description, enabled, owner_user_id, creator_user_id,
-			discord_token, discord_id, discord_avatar, discord_status,
+			discord_token, discord_id, discord_public_key, discord_avatar, discord_status,
 			commands_deploy_at, commands_deployed_hash, commands_deploy_error,
 			created_at, updated_at
 	`
 
 	row := s.db.QueryRowContext(ctx, query,
-		app.ID, app.Name, app.Description, app.Enabled, app.DiscordAvatar, app.DiscordStatus, now,
+		app.ID, app.Name, app.Description, app.Enabled, app.DiscordPublicKey, app.DiscordAvatar, app.DiscordStatus, now,
 	)
 
 	return scanApp(row)
@@ -212,7 +218,7 @@ func (s *PostgresAppStore) ListActiveApps(ctx context.Context, clusterCount, clu
 	query := `
 		SELECT 
 			id, name, description, enabled, owner_user_id, creator_user_id,
-			discord_token, discord_id, discord_avatar, discord_status,
+			discord_token, discord_id, discord_public_key, discord_avatar, discord_status,
 			commands_deploy_at, commands_deployed_hash, commands_deploy_error,
 			created_at, updated_at
 		FROM apps
@@ -228,7 +234,7 @@ func (s *PostgresAppStore) ListActiveApps(ctx context.Context, clusterCount, clu
 	var apps []*model.App
 	for rows.Next() {
 		var a model.App
-		var desc, avatar, hash sql.NullString
+		var desc, pubKey, avatar, hash sql.NullString
 		var deployAt sql.NullTime
 		var status, deployError []byte
 
@@ -241,6 +247,7 @@ func (s *PostgresAppStore) ListActiveApps(ctx context.Context, clusterCount, clu
 			&a.CreatorUserID,
 			&a.DiscordToken,
 			&a.DiscordID,
+			&pubKey,
 			&avatar,
 			&status,
 			&deployAt,
@@ -256,6 +263,10 @@ func (s *PostgresAppStore) ListActiveApps(ctx context.Context, clusterCount, clu
 		if desc.Valid {
 			a.Description = &desc.String
 		}
+		if pubKey.Valid {
+			a.DiscordPublicKey = &pubKey.String
+		}
+
 		if avatar.Valid {
 			a.DiscordAvatar = &avatar.String
 		}
@@ -337,7 +348,7 @@ func (s *PostgresAppStore) UpdateCommandsDeployResult(ctx context.Context, appID
 
 func scanApp(row *sql.Row) (*model.App, error) {
 	var a model.App
-	var desc, avatar, hash sql.NullString
+	var desc, pubKey, avatar, hash sql.NullString
 	var deployAt sql.NullTime
 	var status, deployError []byte
 
@@ -350,6 +361,7 @@ func scanApp(row *sql.Row) (*model.App, error) {
 		&a.CreatorUserID,
 		&a.DiscordToken,
 		&a.DiscordID,
+		&pubKey,
 		&avatar,
 		&status,
 		&deployAt,
@@ -368,9 +380,13 @@ func scanApp(row *sql.Row) (*model.App, error) {
 	if desc.Valid {
 		a.Description = &desc.String
 	}
+	if pubKey.Valid {
+		a.DiscordPublicKey = &pubKey.String
+	}
 	if avatar.Valid {
 		a.DiscordAvatar = &avatar.String
 	}
+
 	if hash.Valid {
 		a.CommandsDeployedHash = &hash.String
 	}

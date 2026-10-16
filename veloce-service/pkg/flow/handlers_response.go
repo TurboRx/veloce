@@ -27,7 +27,7 @@ func executeActionResponseCreate(n *CompiledFlowNode, ctx *FlowContext) error {
 		flags |= discord.EphemeralMessage
 	}
 
-	if ctx.Interaction != nil && ctx.Session != nil {
+	if ctx.Interaction != nil {
 		if !ctx.HasResponded() {
 			resp := api.InteractionResponse{
 				Type: api.MessageInteractionWithSource,
@@ -36,19 +36,30 @@ func executeActionResponseCreate(n *CompiledFlowNode, ctx *FlowContext) error {
 					Flags:   flags,
 				},
 			}
-			err := ctx.Session.RespondInteraction(ctx.Interaction.ID, ctx.Interaction.Token, resp)
-			if err != nil {
-				return fmt.Errorf("failed to respond to interaction: %w", err)
+			if ctx.Session != nil {
+				err := ctx.Session.RespondInteraction(ctx.Interaction.ID, ctx.Interaction.Token, resp)
+				if err != nil {
+					return fmt.Errorf("failed to respond to interaction: %w", err)
+				}
 			}
+			ctx.SetHTTPResponse(resp)
 			ctx.MarkResponded()
 		} else {
 			followup := api.InteractionResponseData{
 				Content: option.NewNullableString(content),
 				Flags:   flags,
 			}
-			_, err := ctx.Session.FollowUpInteraction(ctx.Interaction.AppID, ctx.Interaction.Token, followup)
-			if err != nil {
-				return fmt.Errorf("failed to send followup interaction: %w", err)
+			if ctx.Session != nil {
+				_, err := ctx.Session.FollowUpInteraction(ctx.Interaction.AppID, ctx.Interaction.Token, followup)
+				if err != nil {
+					return fmt.Errorf("failed to send followup interaction: %w", err)
+				}
+			} else {
+				client := api.NewClient("")
+				_, err := client.FollowUpInteraction(ctx.Interaction.AppID, ctx.Interaction.Token, followup)
+				if err != nil {
+					return fmt.Errorf("failed to send followup interaction via rest: %w", err)
+				}
 			}
 		}
 	}
@@ -63,16 +74,19 @@ func executeActionResponseDefer(n *CompiledFlowNode, ctx *FlowContext) error {
 		flags |= discord.EphemeralMessage
 	}
 
-	if ctx.Interaction != nil && ctx.Session != nil && !ctx.HasResponded() {
+	if ctx.Interaction != nil && !ctx.HasResponded() {
 		resp := api.InteractionResponse{
 			Type: api.DeferredMessageInteractionWithSource,
 			Data: &api.InteractionResponseData{
 				Flags: flags,
 			},
 		}
-		if err := ctx.Session.RespondInteraction(ctx.Interaction.ID, ctx.Interaction.Token, resp); err != nil {
-			return fmt.Errorf("failed to defer interaction: %w", err)
+		if ctx.Session != nil {
+			if err := ctx.Session.RespondInteraction(ctx.Interaction.ID, ctx.Interaction.Token, resp); err != nil {
+				return fmt.Errorf("failed to defer interaction: %w", err)
+			}
 		}
+		ctx.SetHTTPResponse(resp)
 		ctx.MarkResponded()
 	}
 
@@ -85,13 +99,21 @@ func executeActionResponseEdit(n *CompiledFlowNode, ctx *FlowContext) error {
 		return fmt.Errorf("failed to evaluate edit content: %w", err)
 	}
 
-	if ctx.Interaction != nil && ctx.Session != nil {
+	if ctx.Interaction != nil {
 		data := api.EditInteractionResponseData{
 			Content: option.NewNullableString(content),
 		}
-		_, err := ctx.Session.EditInteractionResponse(ctx.Interaction.AppID, ctx.Interaction.Token, data)
-		if err != nil {
-			return fmt.Errorf("failed to edit interaction response: %w", err)
+		if ctx.Session != nil {
+			_, err := ctx.Session.EditInteractionResponse(ctx.Interaction.AppID, ctx.Interaction.Token, data)
+			if err != nil {
+				return fmt.Errorf("failed to edit interaction response: %w", err)
+			}
+		} else {
+			client := api.NewClient("")
+			_, err := client.EditInteractionResponse(ctx.Interaction.AppID, ctx.Interaction.Token, data)
+			if err != nil {
+				return fmt.Errorf("failed to edit interaction response via rest: %w", err)
+			}
 		}
 	}
 
@@ -100,10 +122,18 @@ func executeActionResponseEdit(n *CompiledFlowNode, ctx *FlowContext) error {
 }
 
 func executeActionResponseDelete(n *CompiledFlowNode, ctx *FlowContext) error {
-	if ctx.Interaction != nil && ctx.Session != nil {
-		if err := ctx.Session.DeleteInteractionResponse(ctx.Interaction.AppID, ctx.Interaction.Token); err != nil {
-			return fmt.Errorf("failed to delete interaction response: %w", err)
+	if ctx.Interaction != nil {
+		if ctx.Session != nil {
+			if err := ctx.Session.DeleteInteractionResponse(ctx.Interaction.AppID, ctx.Interaction.Token); err != nil {
+				return fmt.Errorf("failed to delete interaction response: %w", err)
+			}
+		} else {
+			client := api.NewClient("")
+			if err := client.DeleteInteractionResponse(ctx.Interaction.AppID, ctx.Interaction.Token); err != nil {
+				return fmt.Errorf("failed to delete interaction response via rest: %w", err)
+			}
 		}
 	}
 	return n.ExecuteChildren(ctx)
 }
+

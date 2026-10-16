@@ -75,6 +75,7 @@ limit_req_status 429;
 
 map $uri $veloce_app_id {
     ~^/v1/apps/(?<id>[^/]+)/ $id;
+    ~^/(?:v1/)?interactions/(?<id>[^/]+) $id;
     default "";
 }
 
@@ -119,6 +120,12 @@ server {
 
     location /v1/webhooks/ {
         limit_req zone=veloce_webhook burst=100 nodelay;
+
+        proxy_pass http://$veloce_upstream;
+    }
+
+    location ~ ^/(?:v1/)?interactions/ {
+        limit_req zone=veloce_webhook burst=200 nodelay;
 
         proxy_pass http://$veloce_upstream;
     }

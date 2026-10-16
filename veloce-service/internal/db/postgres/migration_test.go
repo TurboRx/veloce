@@ -25,11 +25,12 @@ func TestEmbeddedMigrations(t *testing.T) {
 		}
 	}
 
-	if upCount != 7 {
-		t.Errorf("expected 7 .up.sql files, found %d", upCount)
+	if upCount != 8 {
+		t.Errorf("expected 8 .up.sql files, found %d", upCount)
 	}
 
-	if downCount != 7 {
-		t.Errorf("expected 7 .down.sql files, found %d", downCount)
+	if downCount != 8 {
+		t.Errorf("expected 8 .down.sql files, found %d", downCount)
 	}
 }
+
