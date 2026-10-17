@@ -1,7 +1,7 @@
 import { Terminal, Send, MessageSquare, GitFork, Clock, Database, Zap } from "lucide-react";
 import { FlowNodeType } from "@/lib/api";
 
-interface PaletteItem {
+export interface PaletteItem {
   type: FlowNodeType;
   title: string;
   subtitle: string;
@@ -9,7 +9,7 @@ interface PaletteItem {
   colorClass: string;
 }
 
-const PALETTE_GROUPS: { name: string; items: PaletteItem[] }[] = [
+export const PALETTE_GROUPS: { name: string; items: PaletteItem[] }[] = [
   {
     name: "Entry & Triggers",
     items: [

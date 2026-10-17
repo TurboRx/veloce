@@ -1,15 +1,28 @@
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+export function getApiBaseUrl(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, "");
+  }
+  if (typeof window !== "undefined") {
+    if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+      return "http://localhost:8080";
+    }
+    return window.location.origin;
+  }
+  return "http://localhost:8080";
+}
 
 export function getApiUrl(path?: string): string {
-  let baseUrl = API_BASE;
-  if (!baseUrl && typeof window !== "undefined") {
-    baseUrl = window.location.origin;
-  }
+  const baseUrl = getApiBaseUrl();
   if (!path) return baseUrl;
   return baseUrl.replace(/\/$/, "") + path;
 }
 
-export const loginUrl = getApiUrl("/v1/auth/login?redirect=/apps");
+export function getLoginUrl(redirect = "/apps"): string {
+  return getApiUrl(`/v1/auth/login?redirect=${encodeURIComponent(redirect)}`);
+}
+
+export const loginUrl = typeof window !== "undefined" ? getLoginUrl("/apps") : "/v1/auth/login?redirect=%2Fapps";
+
 
 export interface User {
   id: string;
@@ -142,7 +155,7 @@ export interface Guild {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const url = `${API_BASE}${path}`;
+  const url = getApiUrl(path);
   const res = await fetch(url, {
     ...options,
     credentials: "include",

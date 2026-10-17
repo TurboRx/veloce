@@ -1,33 +1,21 @@
 import React from "react";
-import { Sliders, Trash2, HelpCircle } from "lucide-react";
+import { Sliders, Trash2, HelpCircle, X } from "lucide-react";
 import { FlowNodeData } from "@/lib/api";
 import { Node } from "@xyflow/react";
 
-interface BlockInspectorProps {
-  selectedNode: Node<any> | null;
+interface BlockFieldsProps {
+  selectedNode: Node<any>;
   onUpdateNodeData: (nodeId: string, newData: Partial<FlowNodeData>) => void;
   onDeleteNode: (nodeId: string) => void;
+  onClose?: () => void;
 }
 
-export function BlockInspector({
+export function BlockFields({
   selectedNode,
   onUpdateNodeData,
   onDeleteNode,
-}: BlockInspectorProps) {
-  if (!selectedNode) {
-    return (
-      <aside className="w-80 border-l border-slate-800 bg-slate-900/50 p-6 flex flex-col items-center justify-center text-center hidden lg:flex">
-        <div className="p-3 rounded-full bg-slate-800 text-slate-500 mb-3">
-          <Sliders className="w-5 h-5" />
-        </div>
-        <h4 className="text-sm font-semibold text-slate-300">No Block Selected</h4>
-        <p className="text-xs text-slate-500 mt-1 max-w-[200px]">
-          Click any block on the flow canvas to configure its properties and logic.
-        </p>
-      </aside>
-    );
-  }
-
+  onClose,
+}: BlockFieldsProps) {
   const { id, type, data } = selectedNode;
   const isEntry = type === "entry_command" || type === "entry_event";
 
@@ -36,16 +24,28 @@ export function BlockInspector({
   };
 
   return (
-    <aside className="w-80 border-l border-slate-800 bg-slate-900/50 p-5 flex flex-col justify-between overflow-y-auto hidden lg:flex">
+    <div className="flex flex-col h-full justify-between gap-6">
       <div className="space-y-5">
         <div className="flex items-center justify-between pb-3 border-b border-slate-800">
           <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
             <Sliders className="w-4 h-4 text-indigo-400" />
-            <span>BLOCK INSPECTOR</span>
+            <span>BLOCK SETTINGS</span>
           </div>
-          <span className="text-[10px] font-mono text-slate-500 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
-            {type}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-mono text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+              {type}
+            </span>
+            {onClose && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="p-1 rounded text-slate-400 hover:text-slate-100 transition lg:hidden"
+                title="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Dynamic Fields by Type */}
@@ -58,7 +58,7 @@ export function BlockInspector({
               <select
                 value={data?.data?.event_type || "message_create"}
                 onChange={(e) => handleChange("event_type", e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none focus:border-amber-500"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
               >
                 <option value="message_create">message_create (New Message)</option>
                 <option value="message_update">message_update (Edited Message)</option>
@@ -69,7 +69,7 @@ export function BlockInspector({
                 <option value="message_reaction_remove">message_reaction_remove (Reaction Removed)</option>
                 <option value="guild_boost">guild_boost (Server Boosted)</option>
               </select>
-              <p className="text-[10px] text-slate-500 mt-1">Select the Discord gateway event trigger.</p>
+              <p className="text-[10px] text-slate-500 mt-1">Select what Discord event triggers this flow.</p>
             </div>
 
             <div>
@@ -81,11 +81,12 @@ export function BlockInspector({
                 value={data?.data?.description || ""}
                 onChange={(e) => handleChange("description", e.target.value)}
                 placeholder="What this event listener does"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-amber-500 resize-none"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-indigo-500 resize-none"
               />
             </div>
           </div>
         )}
+
         {type === "entry_command" && (
           <div className="space-y-4 text-xs">
             <div>
@@ -131,18 +132,18 @@ export function BlockInspector({
                 value={data?.data?.response_content || ""}
                 onChange={(e) => handleChange("response_content", e.target.value)}
                 placeholder="Pong! Hello {user.username}."
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono focus:outline-none focus:border-cyan-500 resize-none"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono focus:outline-none focus:border-indigo-500 resize-none"
               />
               <div className="flex items-center gap-1 text-[10px] text-slate-500 mt-1">
                 <HelpCircle className="w-3 h-3" />
-                <span>Supports expressions: {"{user.id}"}, {"{user.username}"}</span>
+                <span>Supports variables: {"{user.id}"}, {"{user.username}"}</span>
               </div>
             </div>
 
-            <div className="flex items-center justify-between p-3 rounded-lg bg-slate-950 border border-slate-800">
+            <div className="flex items-center justify-between p-3 rounded-xl bg-slate-950 border border-slate-800">
               <div>
                 <span className="text-xs font-medium text-slate-200 block">Ephemeral Response</span>
-                <span className="text-[10px] text-slate-500">Only visible to the user who invoked it</span>
+                <span className="text-[10px] text-slate-500">Only visible to the user who triggered it</span>
               </div>
               <input
                 type="checkbox"
@@ -163,7 +164,7 @@ export function BlockInspector({
                 value={data?.data?.message_channel_id || ""}
                 onChange={(e) => handleChange("message_channel_id", e.target.value)}
                 placeholder="1029384756..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none focus:border-blue-500"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
               />
             </div>
 
@@ -173,8 +174,8 @@ export function BlockInspector({
                 rows={4}
                 value={data?.data?.message_content || ""}
                 onChange={(e) => handleChange("message_content", e.target.value)}
-                placeholder="Log message sent to channel..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono focus:outline-none focus:border-blue-500 resize-none"
+                placeholder="Message sent to channel..."
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono focus:outline-none focus:border-indigo-500 resize-none"
               />
             </div>
           </div>
@@ -194,7 +195,7 @@ export function BlockInspector({
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono focus:outline-none focus:border-indigo-500 resize-none"
               />
               <p className="text-[10px] text-slate-500 mt-1">
-                Evaluates in Go expression engine. Connect True / False handles.
+                Checks if condition matches, then routes down the True or False path.
               </p>
             </div>
           </div>
@@ -210,7 +211,7 @@ export function BlockInspector({
                 max={300}
                 value={data?.data?.delay_seconds || 1}
                 onChange={(e) => handleChange("delay_seconds", parseInt(e.target.value, 10) || 1)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none focus:border-amber-500"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
               />
             </div>
           </div>
@@ -225,7 +226,7 @@ export function BlockInspector({
                 value={data?.data?.variable_name || ""}
                 onChange={(e) => handleChange("variable_name", e.target.value)}
                 placeholder="counter"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none focus:border-purple-500"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
               />
             </div>
             <div>
@@ -235,7 +236,7 @@ export function BlockInspector({
                 value={data?.data?.variable_value || ""}
                 onChange={(e) => handleChange("variable_value", e.target.value)}
                 placeholder="100 or {user.username}"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none focus:border-purple-500"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
               />
             </div>
           </div>
@@ -247,12 +248,48 @@ export function BlockInspector({
         <div className="pt-4 border-t border-slate-800">
           <button
             onClick={() => onDeleteNode(id)}
-            className="w-full py-2 px-3 rounded-lg border border-rose-500/30 text-rose-400 hover:bg-rose-500/10 text-xs font-medium transition flex items-center justify-center gap-1.5"
+            className="w-full py-2 px-3 rounded-xl border border-rose-500/30 text-rose-400 hover:bg-rose-500/10 text-xs font-medium transition flex items-center justify-center gap-1.5"
           >
             <Trash2 className="w-3.5 h-3.5" /> Delete Block
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+interface BlockInspectorProps {
+  selectedNode: Node<any> | null;
+  onUpdateNodeData: (nodeId: string, newData: Partial<FlowNodeData>) => void;
+  onDeleteNode: (nodeId: string) => void;
+}
+
+export function BlockInspector({
+  selectedNode,
+  onUpdateNodeData,
+  onDeleteNode,
+}: BlockInspectorProps) {
+  if (!selectedNode) {
+    return (
+      <aside className="w-80 border-l border-slate-800 bg-slate-900/50 p-6 flex flex-col items-center justify-center text-center hidden lg:flex">
+        <div className="p-3 rounded-full bg-slate-800 text-slate-500 mb-3">
+          <Sliders className="w-5 h-5" />
+        </div>
+        <h4 className="text-sm font-semibold text-slate-300">No Block Selected</h4>
+        <p className="text-xs text-slate-500 mt-1 max-w-[200px]">
+          Click any block on the flow canvas to configure its properties and logic.
+        </p>
+      </aside>
+    );
+  }
+
+  return (
+    <aside className="w-80 border-l border-slate-800 bg-slate-900/50 p-5 flex flex-col justify-between overflow-y-auto hidden lg:flex">
+      <BlockFields
+        selectedNode={selectedNode}
+        onUpdateNodeData={onUpdateNodeData}
+        onDeleteNode={onDeleteNode}
+      />
     </aside>
   );
 }

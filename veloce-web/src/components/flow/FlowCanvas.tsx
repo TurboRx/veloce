@@ -60,7 +60,7 @@ export function FlowCanvas({
 
   return (
     <div
-      className="w-full h-full bg-slate-950 rounded-xl border border-slate-800 overflow-hidden shadow-2xl relative"
+      className="w-full h-full bg-slate-950 rounded-2xl border border-slate-800/80 overflow-hidden shadow-2xl relative"
       onDrop={onDrop}
       onDragOver={onDragOver}
     >
@@ -74,15 +74,31 @@ export function FlowCanvas({
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         fitView
+        fitViewOptions={{
+          padding: 0.35,
+          maxZoom: 1.0,
+          minZoom: 0.2,
+        }}
+        minZoom={0.2}
+        maxZoom={1.5}
+        defaultViewport={{ x: 0, y: 0, zoom: 0.85 }}
+        panOnScroll={false}
+        panOnDrag={true}
+        zoomOnPinch={true}
+        preventScrolling={false}
+        proOptions={{ hideAttribution: true }}
       >
-        <Controls className="bg-slate-900 border border-slate-700 text-white rounded shadow-md" />
+        <Controls
+          showInteractive={false}
+          className="hidden md:flex bg-slate-900 border border-slate-800 text-slate-300 rounded-xl shadow-lg overflow-hidden"
+        />
         <MiniMap
           nodeStrokeWidth={3}
           zoomable
           pannable
-          className="bg-slate-900 border border-slate-800 rounded"
+          className="hidden md:block bg-slate-900/90 border border-slate-800 rounded-xl"
         />
-        <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#334155" />
+        <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#334155" />
       </ReactFlow>
     </div>
   );

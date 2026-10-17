@@ -1,42 +1,11 @@
 import Head from "next/head";
 import Link from "next/link";
-import { Zap, Bot, ArrowRight, ShieldCheck, Cpu, Layers, LogIn, LogOut, User as UserIcon } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
-
-import { api, getApiUrl, loginUrl, User as UserData } from "@/lib/api";
-
-interface HealthData {
-  status: string;
-  version: string;
-  timestamp: string;
-}
+import { Zap, Bot, ArrowRight, ShieldCheck, Layers, LogIn, LogOut, User as UserIcon } from "lucide-react";
+import { useCurrentUser } from "@/lib/useAuth";
+import { api, getLoginUrl } from "@/lib/api";
 
 export default function Home() {
-  const { data: health, isLoading: healthLoading } = useQuery<HealthData>({
-    queryKey: ["service-health"],
-    queryFn: async () => {
-      try {
-        const res = await fetch(getApiUrl("/v1/health"));
-        if (!res.ok) throw new Error("Offline");
-        return res.json();
-      } catch {
-        return { status: "ready", version: "0.1.0", timestamp: new Date().toISOString() };
-      }
-    },
-    refetchInterval: 15000,
-  });
-
-  const { data: user, refetch: refetchUser } = useQuery<UserData | null>({
-    queryKey: ["current-user"],
-    queryFn: async () => {
-      try {
-        return await api.getCurrentUser();
-      } catch {
-        return null;
-      }
-    },
-    retry: false,
-  });
+  const { data: user, refetch: refetchUser } = useCurrentUser();
 
   const handleLogout = async () => {
     try {
@@ -47,154 +16,153 @@ export default function Home() {
     }
   };
 
+  const loginHref = getLoginUrl("/apps");
+
   return (
     <>
       <Head>
-        <title>Veloce - High-Velocity No-Code Discord Bot Builder</title>
-        <meta name="description" content="Build powerful Discord bots visually with zero code." />
+        <title>Veloce - Visual Discord Bot Builder</title>
+        <meta
+          name="description"
+          content="Build powerful, interactive Discord bots visually without code."
+        />
       </Head>
 
-      <main className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between">
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between selection:bg-indigo-500/30 overflow-x-hidden">
         {/* Navigation */}
-        <header className="border-b border-slate-800/80 px-6 py-4 flex items-center justify-between backdrop-blur bg-slate-950/70 sticky top-0 z-50">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-indigo-600/20 rounded-lg border border-indigo-500/30 text-indigo-400">
-              <Zap className="w-5 h-5 fill-current" />
+        <header className="border-b border-slate-800/80 px-4 sm:px-8 py-3.5 flex items-center justify-between backdrop-blur-md bg-slate-950/80 sticky top-0 z-50">
+          <Link href="/" className="flex items-center gap-2.5">
+            <div className="p-2 bg-indigo-600/10 rounded-xl border border-indigo-500/20 text-indigo-400">
+              <Zap className="w-4 h-4 fill-current" />
             </div>
-            <span className="font-bold text-lg tracking-tight bg-gradient-to-r from-indigo-400 via-cyan-400 to-emerald-400 bg-clip-text text-transparent">
+            <span className="font-bold text-base tracking-tight text-slate-100">
               VELOCE
             </span>
-          </div>
+          </Link>
 
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-full bg-slate-900 border border-slate-800">
-              <span className={`w-2 h-2 rounded-full ${healthLoading ? "bg-amber-400 animate-pulse" : "bg-emerald-400"}`} />
-              <span className="text-slate-400">Backend:</span>
-              <span className="text-slate-200">{health?.status || "Connecting..."}</span>
-            </div>
-
+          <div className="flex items-center gap-2.5 sm:gap-3">
             {user ? (
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
+              <>
+                <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
                   {user.discord_avatar ? (
                     <img
                       src={`https://cdn.discordapp.com/avatars/${user.discord_id}/${user.discord_avatar}.png?size=32`}
                       alt={user.display_name}
-                      className="w-5 h-5 rounded-full"
+                      className="w-4 h-4 rounded-full"
                     />
                   ) : (
-                    <UserIcon className="w-4 h-4 text-slate-400" />
+                    <UserIcon className="w-3.5 h-3.5 text-slate-400" />
                   )}
-                  <span className="font-medium text-slate-200">{user.display_name}</span>
+                  <span className="font-medium text-slate-200 hidden sm:inline">{user.display_name}</span>
                 </div>
+
+                <Link
+                  href="/apps"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition shadow-sm"
+                >
+                  Flow Builder <ArrowRight className="w-3.5 h-3.5" />
+                </Link>
+
                 <button
                   onClick={handleLogout}
                   className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-900 transition"
-                  title="Log out"
+                  title="Sign out"
                 >
                   <LogOut className="w-4 h-4" />
                 </button>
-              </div>
+              </>
             ) : (
               <a
-                href={loginUrl}
-                className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#5865F2] hover:bg-[#4752C4] text-white transition shadow"
+                href={loginHref}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded-lg bg-[#5865F2] hover:bg-[#4752C4] text-white transition shadow-sm"
               >
-                <LogIn className="w-3.5 h-3.5" /> Sign in with Discord
+                <LogIn className="w-3.5 h-3.5" /> Sign In
               </a>
             )}
-
-            {user && (
-              <Link
-                href="/apps"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 transition"
-              >
-                <Bot className="w-3.5 h-3.5 text-indigo-400" /> My Bots
-              </Link>
-            )}
-
-            <Link
-              href="/builder"
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow transition"
-            >
-              Open Builder <ArrowRight className="w-4 h-4" />
-            </Link>
           </div>
         </header>
 
         {/* Hero Section */}
-        <section className="max-w-5xl mx-auto px-6 py-16 text-center flex flex-col items-center">
+        <section className="w-full max-w-4xl mx-auto px-4 sm:px-6 py-12 sm:py-20 text-center flex flex-col items-center">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-medium mb-6">
-            <Bot className="w-3.5 h-3.5" /> High-Throughput Discord Automation
+            <Bot className="w-3.5 h-3.5" /> Visual Discord Bot Builder
           </div>
 
-          <h1 className="text-4xl sm:text-6xl font-extrabold tracking-tight max-w-3xl leading-tight">
-            The high-velocity, no-code{" "}
-            <span className="bg-gradient-to-r from-indigo-400 via-cyan-400 to-emerald-400 bg-clip-text text-transparent">
-              Discord Bot Builder
-            </span>
+          <h1 className="text-3xl sm:text-5xl md:text-6xl font-extrabold tracking-tight text-slate-100 max-w-2xl leading-[1.15]">
+            Build custom Discord bots{" "}
+            <span className="text-indigo-400">without writing code</span>
           </h1>
 
-          <p className="mt-6 text-slate-400 text-lg max-w-2xl">
-            Design interactive slash commands, automated server event listeners, and dynamic response flows on an intuitive visual canvas. Built on Go and React Flow.
+          <p className="mt-5 text-slate-400 text-sm sm:text-base max-w-xl leading-relaxed">
+            Create interactive slash commands, automate server triggers, and design smart flows on an intuitive visual canvas. Fast, secure, and ready for your community.
           </p>
 
-          <div className="mt-8 flex items-center gap-4">
-            <Link
-              href="/builder"
-              className="px-6 py-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm shadow-lg shadow-indigo-600/20 transition flex items-center gap-2"
-            >
-              Launch Flow Canvas <ArrowRight className="w-4 h-4" />
-            </Link>
+          <div className="mt-8 flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto">
+            {user ? (
+              <Link
+                href="/apps"
+                className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm shadow-md transition flex items-center justify-center gap-2"
+              >
+                Flow Builder <ArrowRight className="w-4 h-4" />
+              </Link>
+            ) : (
+              <a
+                href={loginHref}
+                className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-[#5865F2] hover:bg-[#4752C4] text-white font-medium text-sm shadow-md transition flex items-center justify-center gap-2"
+              >
+                <LogIn className="w-4 h-4" /> Sign In
+              </a>
+            )}
+
             <a
               href="https://github.com/TurboRx/veloce"
               target="_blank"
               rel="noreferrer"
-              className="px-6 py-3 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 font-medium text-sm transition"
+              className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-medium text-sm transition text-center"
             >
-              View GitHub Repo
+              GitHub
             </a>
           </div>
 
           {/* Feature Highlights */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-16 text-left w-full">
-            <div className="p-6 rounded-xl bg-slate-900/60 border border-slate-800">
-              <div className="p-2.5 w-fit rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 mb-4">
-                <Cpu className="w-5 h-5" />
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6 mt-16 text-left w-full">
+            <div className="p-5 sm:p-6 rounded-2xl bg-slate-900/40 border border-slate-800/80">
+              <div className="p-2.5 w-fit rounded-xl bg-indigo-500/10 text-indigo-400 mb-3.5">
+                <Zap className="w-4 h-4" />
               </div>
-              <h3 className="font-semibold text-slate-100 mb-2">Compiled Go Engine</h3>
-              <p className="text-sm text-slate-400 leading-relaxed">
-                Flow graphs are compiled into in-memory trees and run across lightweight goroutines with sub-millisecond dispatch.
+              <h3 className="font-semibold text-sm text-slate-100 mb-1.5">Instant Responses</h3>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Commands and button interactions trigger with sub-millisecond dispatch so your community gets fluid, instant replies.
               </p>
             </div>
 
-            <div className="p-6 rounded-xl bg-slate-900/60 border border-slate-800">
-              <div className="p-2.5 w-fit rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 mb-4">
-                <Layers className="w-5 h-5" />
+            <div className="p-5 sm:p-6 rounded-2xl bg-slate-900/40 border border-slate-800/80">
+              <div className="p-2.5 w-fit rounded-xl bg-indigo-500/10 text-indigo-400 mb-3.5">
+                <Layers className="w-4 h-4" />
               </div>
-              <h3 className="font-semibold text-slate-100 mb-2">Visual Node Canvas</h3>
-              <p className="text-sm text-slate-400 leading-relaxed">
-                Seamless drag-and-drop workflow editor built with React Flow, rich conditions, message templates, and undo/redo history.
+              <h3 className="font-semibold text-sm text-slate-100 mb-1.5">Visual Flow Canvas</h3>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Connect triggers, conditions, and actions visually on a clean drag-and-drop workspace.
               </p>
             </div>
 
-            <div className="p-6 rounded-xl bg-slate-900/60 border border-slate-800">
-              <div className="p-2.5 w-fit rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 mb-4">
-                <ShieldCheck className="w-5 h-5" />
+            <div className="p-5 sm:p-6 rounded-2xl bg-slate-900/40 border border-slate-800/80">
+              <div className="p-2.5 w-fit rounded-xl bg-indigo-500/10 text-indigo-400 mb-3.5">
+                <ShieldCheck className="w-4 h-4" />
               </div>
-              <h3 className="font-semibold text-slate-100 mb-2">Encrypted Multi-Tenancy</h3>
-              <p className="text-sm text-slate-400 leading-relaxed">
-                Customer bot tokens are AES-256 encrypted at rest, and sharded websocket connections handle thousands of bots efficiently.
+              <h3 className="font-semibold text-sm text-slate-100 mb-1.5">Always Online</h3>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Built for 24/7 reliability. Your bots stay active around the clock without manual server maintenance.
               </p>
             </div>
           </div>
         </section>
 
         {/* Footer */}
-        <footer className="border-t border-slate-800/80 px-6 py-6 text-center text-xs text-slate-500">
-          Veloce &copy; {new Date().getFullYear()} &bull; Licensed under AGPL-3.0
+        <footer className="border-t border-slate-800/80 px-4 sm:px-8 py-5 text-center text-xs text-slate-500">
+          Veloce &copy; {new Date().getFullYear()} &bull; Visual Discord Bot Builder
         </footer>
-      </main>
+      </div>
     </>
   );
 }
