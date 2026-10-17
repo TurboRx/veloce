@@ -235,9 +235,15 @@ export default function Home() {
                 <a href="#pricing" className="hover:text-foreground transition">
                   Pricing
                 </a>
-                <a href="#faq" className="hover:text-foreground transition">
-                  FAQ
-                </a>
+                <Link
+                  href="/guides/how-to-make-a-discord-bot"
+                  className="hover:text-foreground transition"
+                >
+                  Guide
+                </Link>
+                <Link href="/tools" className="hover:text-foreground transition">
+                  Tools
+                </Link>
               </nav>
             </div>
 
@@ -754,8 +760,8 @@ export default function Home() {
 
         {/* Multi-Column Footer */}
         <footer className="border-t border-border bg-card/40 py-12 px-4 sm:px-6 text-xs text-muted-foreground">
-          <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-8 mb-8">
-            <div className="md:col-span-2">
+          <div className="max-w-7xl mx-auto grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-8 mb-8">
+            <div className="sm:col-span-2">
               <div className="flex items-center gap-2 text-foreground font-bold text-base mb-3">
                 <div className="p-1.5 bg-primary/15 rounded-lg border border-primary/30 text-primary">
                   <Zap className="w-4 h-4 fill-current" />
@@ -772,7 +778,7 @@ export default function Home() {
               <h4 className="font-semibold text-foreground mb-3 uppercase tracking-wider text-[11px]">
                 Platform
               </h4>
-              <ul className="space-y-2">
+              <ul className="space-y-2.5">
                 <li>
                   <a href="#use-cases" className="hover:text-foreground transition">
                     Use Cases
@@ -800,31 +806,47 @@ export default function Home() {
               <h4 className="font-semibold text-foreground mb-3 uppercase tracking-wider text-[11px]">
                 Resources
               </h4>
-              <ul className="space-y-2">
+              <ul className="space-y-2.5">
                 <li>
-                  <a
-                    href="https://discord.com/developers/applications"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="hover:text-foreground transition"
-                  >
-                    Discord Developer Portal
-                  </a>
+                  <Link href="/docs" className="hover:text-foreground transition">
+                    Documentation
+                  </Link>
                 </li>
                 <li>
-                  <a
-                    href="https://github.com/TurboRx/veloce"
-                    target="_blank"
-                    rel="noreferrer"
+                  <Link
+                    href="/guides/how-to-make-a-discord-bot"
                     className="hover:text-foreground transition"
                   >
-                    GitHub Repository
-                  </a>
+                    Bot Building Guide
+                  </Link>
                 </li>
                 <li>
-                  <a href="#faq" className="hover:text-foreground transition">
-                    FAQ &amp; Help
-                  </a>
+                  <Link href="/tools" className="hover:text-foreground transition">
+                    Discord Tools
+                  </Link>
+                </li>
+              </ul>
+            </div>
+
+            <div>
+              <h4 className="font-semibold text-foreground mb-3 uppercase tracking-wider text-[11px]">
+                Legal
+              </h4>
+              <ul className="space-y-2.5">
+                <li>
+                  <Link href="/terms" className="hover:text-foreground transition">
+                    Terms of Service
+                  </Link>
+                </li>
+                <li>
+                  <Link href="/privacy" className="hover:text-foreground transition">
+                    Privacy Policy
+                  </Link>
+                </li>
+                <li>
+                  <Link href="/refund" className="hover:text-foreground transition">
+                    Refund Policy
+                  </Link>
                 </li>
               </ul>
             </div>

@@ -14,8 +14,9 @@ export interface Env {
 
 const app = new Hono<{ Bindings: Env }>();
 
-// Track active gateway sessions within the current Worker isolate
+// Track active gateway sessions & WebSocket instances within the current Worker isolate
 const activeGatewaySessions = new Map<string, number>();
+const activeGatewaySockets = new Map<string, WebSocket>();
 let schemaMigrated = false;
 
 app.use(
@@ -84,6 +85,106 @@ async function ensureAdminUser(sql: any) {
   }
 }
 
+function disconnectBotGatewayImmediate(appId: string) {
+  activeGatewaySessions.delete(appId);
+  const ws = activeGatewaySockets.get(appId);
+  if (ws) {
+    try {
+      ws.send(
+        JSON.stringify({
+          op: 3,
+          d: {
+            since: null,
+            activities: [],
+            status: "invisible",
+            afk: false,
+          },
+        })
+      );
+      ws.close(1000, "Bot disconnected");
+    } catch {}
+    activeGatewaySockets.delete(appId);
+  }
+}
+
+async function forceDiscordBotOfflineAndClearCommands(discordId?: string, discordToken?: string) {
+  if (!discordToken) return;
+
+  // 1. Clear all global slash commands on Discord
+  if (discordId && discordId !== "000000000000000000") {
+    try {
+      await fetch(`https://discord.com/api/v10/applications/${discordId}/commands`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bot ${discordToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify([]),
+      });
+    } catch (err) {
+      console.error("Failed to clear Discord commands on delete", err);
+    }
+  }
+
+  // 2. Connect briefly to Gateway with status="invisible" and close with 1000 so Discord marks bot Offline immediately
+  await new Promise<void>((resolve) => {
+    let ws: WebSocket | null = null;
+    const timer = setTimeout(() => {
+      try {
+        ws?.close(1000, "Offline");
+      } catch {}
+      resolve();
+    }, 3500);
+
+    try {
+      ws = new WebSocket("wss://gateway.discord.gg/?v=10&encoding=json");
+      ws.addEventListener("message", (event: MessageEvent) => {
+        try {
+          const packet = JSON.parse(typeof event.data === "string" ? event.data : "{}");
+          if (packet.op === 10) {
+            ws?.send(
+              JSON.stringify({
+                op: 2,
+                d: {
+                  token: discordToken,
+                  intents: 1,
+                  properties: { os: "linux", browser: "veloce", device: "veloce" },
+                  presence: {
+                    status: "invisible",
+                    activities: [],
+                    afk: true,
+                  },
+                },
+              })
+            );
+          } else if (packet.op === 0 && packet.t === "READY") {
+            ws?.send(
+              JSON.stringify({
+                op: 3,
+                d: { since: null, activities: [], status: "invisible", afk: true },
+              })
+            );
+            clearTimeout(timer);
+            ws?.close(1000, "Bot removed");
+            resolve();
+          }
+        } catch {}
+      });
+      ws.addEventListener("error", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      ws.addEventListener("close", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    } catch {
+      clearTimeout(timer);
+      resolve();
+    }
+  });
+}
+
 async function syncSlashCommandsWithDiscord(sql: any, botApp: any) {
   if (!botApp?.discord_id || botApp.discord_id === "000000000000000000" || !botApp?.discord_token) {
     return { synced: false, count: 0 };
@@ -95,7 +196,6 @@ async function syncSlashCommandsWithDiscord(sql: any, botApp: any) {
     WHERE app_id = ${botApp.id} AND enabled = true
   `;
 
-  // If the bot has 0 commands, seed a default /ping command automatically
   if (!commands || commands.length === 0) {
     await ensureAdminUser(sql);
     const cmdId = "cmd_" + crypto.randomUUID().replace(/-/g, "").substring(0, 16);
@@ -181,7 +281,7 @@ async function processBotInteraction(botApp: any, payload: InteractionPayload, s
     if (!cmdName) {
       return {
         type: 4,
-        data: { content: applyBranding("Unknown command invocation", addBranding) },
+        data: { content: applyBranding("Unknown command invocation", addBranding), flags: 64 },
       };
     }
 
@@ -204,7 +304,6 @@ async function processBotInteraction(botApp: any, payload: InteractionPayload, s
 
       const execution = executeFlow(flowSource, payload, { addBranding });
 
-      // Send any additional channel messages queued by action_message_create
       if (execution.channelMessages && execution.channelMessages.length > 0 && botApp.discord_token) {
         for (const msg of execution.channelMessages) {
           fetch(`https://discord.com/api/v10/channels/${msg.channel_id}/messages`, {
@@ -235,10 +334,8 @@ async function processBotInteraction(botApp: any, payload: InteractionPayload, s
     return {
       type: 4,
       data: {
-        content: applyBranding(
-          `Pong! 🏓 Executed /${cmdName} on ${botApp.name}.`,
-          addBranding
-        ),
+        content: "This command is no longer active.",
+        flags: 64,
       },
     };
   }
@@ -249,8 +346,7 @@ async function processBotInteraction(botApp: any, payload: InteractionPayload, s
   };
 }
 
-// Maintain a Discord Gateway WebSocket session so the bot appears Online in Discord
-// and processes real-time slash commands & gateway events directly in Cloudflare Workers.
+// Maintain a Discord Gateway WebSocket session so enabled bots appear Online in Discord
 async function maintainBotGateway(botApp: any, sql: any, durationMs = 25000): Promise<void> {
   if (!botApp?.discord_token || !botApp?.enabled) return;
 
@@ -285,11 +381,13 @@ async function maintainBotGateway(botApp: any, sql: any, durationMs = 25000): Pr
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (closeTimer) clearTimeout(closeTimer);
       activeGatewaySessions.delete(botApp.id);
+      activeGatewaySockets.delete(botApp.id);
       resolve();
     };
 
     try {
       ws = new WebSocket("wss://gateway.discord.gg/?v=10&encoding=json");
+      activeGatewaySockets.set(botApp.id, ws);
     } catch {
       cleanup();
       return;
@@ -297,8 +395,7 @@ async function maintainBotGateway(botApp: any, sql: any, durationMs = 25000): Pr
 
     closeTimer = setTimeout(() => {
       try {
-        // Close with code 4000 so Discord keeps the session briefly warm between ticks
-        ws?.close(4000, "Worker cycle refresh");
+        ws?.close(1000, "Cycle complete");
       } catch {}
       cleanup();
     }, durationMs);
@@ -310,11 +407,19 @@ async function maintainBotGateway(botApp: any, sql: any, durationMs = 25000): Pr
           seq = packet.s;
         }
 
-        // Opcode 10: Hello -> Send Identify + start Heartbeat
         if (packet.op === 10) {
           const interval = packet.d?.heartbeat_interval || 41250;
-          heartbeatTimer = setInterval(() => {
+          heartbeatTimer = setInterval(async () => {
             try {
+              // Verify bot still exists and is enabled before heartbeating
+              const activeCheck = await sql`
+                SELECT enabled FROM apps WHERE id = ${botApp.id} LIMIT 1
+              `;
+              if (!activeCheck || activeCheck.length === 0 || !activeCheck[0].enabled) {
+                disconnectBotGatewayImmediate(botApp.id);
+                cleanup();
+                return;
+              }
               ws?.send(JSON.stringify({ op: 1, d: seq }));
             } catch {}
           }, interval);
@@ -345,11 +450,23 @@ async function maintainBotGateway(botApp: any, sql: any, durationMs = 25000): Pr
           );
         }
 
-        // Opcode 0: Dispatch Event
         if (packet.op === 0) {
           if (packet.t === "INTERACTION_CREATE" && packet.d) {
+            // Verify the bot still exists and is enabled in DB before answering any command
+            const currentAppRows = await sql`
+              SELECT id, name, discord_id, discord_token, enabled, plan, custom_branding
+              FROM apps
+              WHERE id = ${botApp.id}
+              LIMIT 1
+            `;
+            if (!currentAppRows || currentAppRows.length === 0 || !currentAppRows[0].enabled) {
+              disconnectBotGatewayImmediate(botApp.id);
+              cleanup();
+              return;
+            }
+
             const interaction = packet.d as InteractionPayload;
-            const responseBody = await processBotInteraction(botApp, interaction, sql);
+            const responseBody = await processBotInteraction(currentAppRows[0], interaction, sql);
             if (interaction.id && interaction.token && responseBody) {
               await fetch(
                 `https://discord.com/api/v10/interactions/${interaction.id}/${interaction.token}/callback`,
@@ -380,6 +497,8 @@ async function syncAllBotsGateway(sql: any, durationMs = 25000) {
       FROM apps
       WHERE enabled = true AND discord_token IS NOT NULL
     `;
+    if (!apps || apps.length === 0) return;
+
     await Promise.all(
       apps.map(async (botApp: any) => {
         await syncSlashCommandsWithDiscord(sql, botApp);
@@ -397,7 +516,7 @@ app.get("/", (c) =>
     service: "veloce-api",
     runtime: "cloudflare-workers",
     status: "ok",
-    version: "0.2.0",
+    version: "0.2.1",
     timestamp: new Date().toISOString(),
   })
 );
@@ -462,7 +581,7 @@ app.get("/v1/user/@me", async (c) => {
   });
 });
 
-// Real Discord OAuth2 Login (Direct redirect to discord.com/oauth2/authorize — no fake login screen)
+// Real Discord OAuth2 Login
 app.get("/v1/auth/login", async (c) => {
   const redirect = c.req.query("redirect") || "/apps";
   const origin = getPublicOrigin(c);
@@ -497,8 +616,6 @@ app.get("/v1/auth/login", async (c) => {
     return c.redirect(discordAuthUrl.toString(), 302);
   }
 
-  // If DISCORD_CLIENT_ID is known from the connected Discord application,
-  // set session cookie and redirect to Discord OAuth2 or target path
   const safeRedirect = redirect.startsWith("/") ? redirect : "/apps";
   return new Response(null, {
     status: 302,
@@ -610,14 +727,14 @@ async function handleDiscordInteraction(c: any) {
   await ensureSchema(sql);
 
   const apps = await sql`
-    SELECT id, name, discord_id, discord_public_key, discord_token, plan, custom_branding
+    SELECT id, name, discord_id, discord_public_key, discord_token, enabled, plan, custom_branding
     FROM apps 
-    WHERE id = ${appId} OR discord_id = ${appId}
+    WHERE (id = ${appId} OR discord_id = ${appId}) AND enabled = true
     LIMIT 1
   `;
 
   if (!apps || apps.length === 0) {
-    return c.text("Application not found", 404);
+    return c.text("Application not found or disabled", 404);
   }
 
   const botApp = apps[0];
@@ -665,17 +782,17 @@ app.get("/v1/apps", async (c) => {
     ORDER BY created_at DESC
   `;
 
-  // Keep connected bots online via Gateway WebSocket in background
   c.executionCtx.waitUntil(
     Promise.all(
-      rows.map(async (botApp: any) => {
-        await syncSlashCommandsWithDiscord(sql, botApp);
-        await maintainBotGateway(botApp, sql, 28000);
-      })
+      rows
+        .filter((botApp: any) => botApp.enabled)
+        .map(async (botApp: any) => {
+          await syncSlashCommandsWithDiscord(sql, botApp);
+          await maintainBotGateway(botApp, sql, 25000);
+        })
     )
   );
 
-  // Strip discord_token before returning to client
   const sanitized = rows.map(({ discord_token, ...rest }: any) => rest);
   return c.json(sanitized);
 });
@@ -753,7 +870,7 @@ app.post("/v1/apps", async (c) => {
   c.executionCtx.waitUntil(
     (async () => {
       await syncSlashCommandsWithDiscord(sql, createdApp);
-      await maintainBotGateway(createdApp, sql, 28000);
+      await maintainBotGateway(createdApp, sql, 25000);
     })()
   );
 
@@ -766,7 +883,12 @@ app.patch("/v1/apps/:id", async (c) => {
   const id = c.req.param("id");
   const body = await c.req.json();
 
-  const existing = await sql`SELECT id, plan, custom_branding FROM apps WHERE id = ${id} LIMIT 1`;
+  const existing = await sql`
+    SELECT id, discord_id, discord_token, plan, custom_branding
+    FROM apps
+    WHERE id = ${id}
+    LIMIT 1
+  `;
   if (!existing || existing.length === 0) return c.json({ error: "App not found" }, 404);
 
   const nextPlan = body.plan ?? existing[0].plan ?? "free";
@@ -774,6 +896,13 @@ app.patch("/v1/apps/:id", async (c) => {
   const nextCustomBranding = canUseCustomBranding
     ? body.custom_branding ?? existing[0].custom_branding ?? false
     : false;
+
+  if (body.enabled === false) {
+    disconnectBotGatewayImmediate(id);
+    c.executionCtx.waitUntil(
+      forceDiscordBotOfflineAndClearCommands(undefined, existing[0].discord_token)
+    );
+  }
 
   const rows = await sql`
     UPDATE apps
@@ -797,7 +926,31 @@ app.patch("/v1/apps/:id", async (c) => {
 app.delete("/v1/apps/:id", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
   const id = c.req.param("id");
+
+  const existing = await sql`
+    SELECT id, discord_id, discord_token
+    FROM apps
+    WHERE id = ${id}
+    LIMIT 1
+  `;
+
+  // Disconnect active gateway socket immediately
+  disconnectBotGatewayImmediate(id);
+
+  // Remove child records & app record from DB
+  await sql`DELETE FROM commands WHERE app_id = ${id}`;
+  await sql`DELETE FROM event_listeners WHERE app_id = ${id}`.catch(() => {});
+  await sql`DELETE FROM logs WHERE app_id = ${id}`.catch(() => {});
   await sql`DELETE FROM apps WHERE id = ${id}`;
+
+  // Clear Discord global slash commands and set bot presence to invisible/offline
+  if (existing && existing.length > 0) {
+    const bot = existing[0];
+    c.executionCtx.waitUntil(
+      forceDiscordBotOfflineAndClearCommands(bot.discord_id, bot.discord_token)
+    );
+  }
+
   return c.json({ success: true });
 });
 
@@ -839,7 +992,6 @@ app.post("/v1/apps/:app_id/commands", async (c) => {
     RETURNING id, app_id, creator_user_id, name, description, enabled, flow_source, created_at, updated_at
   `;
 
-  // Automatically sync slash commands with Discord
   c.executionCtx.waitUntil(
     (async () => {
       const apps = await sql`SELECT id, discord_id, discord_token FROM apps WHERE id = ${appId} LIMIT 1`;
@@ -892,7 +1044,6 @@ app.delete("/v1/apps/:app_id/commands/:id", async (c) => {
   return c.json({ success: true });
 });
 
-// Deploy slash commands to Discord API + wake Gateway session
 app.post("/v1/apps/:app_id/commands/deploy", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
@@ -910,7 +1061,7 @@ app.post("/v1/apps/:app_id/commands/deploy", async (c) => {
   const botApp = apps[0];
 
   const result = await syncSlashCommandsWithDiscord(sql, botApp);
-  c.executionCtx.waitUntil(maintainBotGateway(botApp, sql, 28000));
+  c.executionCtx.waitUntil(maintainBotGateway(botApp, sql, 25000));
 
   return c.json({
     queued: true,
@@ -1037,7 +1188,7 @@ app.get("/v1/apps/:app_id/gateway", async (c) => {
   await ensureSchema(sql);
   const appId = c.req.param("app_id");
   let guildCount = 1;
-  let connected = true;
+  let connected = false;
 
   try {
     const apps = await sql`
@@ -1049,7 +1200,9 @@ app.get("/v1/apps/:app_id/gateway", async (c) => {
     if (apps && apps.length > 0) {
       const botApp = apps[0];
       connected = !!botApp.enabled;
-      c.executionCtx.waitUntil(maintainBotGateway(botApp, sql, 28000));
+      if (connected) {
+        c.executionCtx.waitUntil(maintainBotGateway(botApp, sql, 25000));
+      }
     }
   } catch {}
 
@@ -1065,6 +1218,6 @@ export default {
   fetch: app.fetch,
   async scheduled(_event: any, env: Env, ctx: any) {
     const sql = neon(env.DATABASE_URL);
-    ctx.waitUntil(syncAllBotsGateway(sql, 55000));
+    ctx.waitUntil(syncAllBotsGateway(sql, 50000));
   },
 };
