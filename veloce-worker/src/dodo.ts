@@ -1,7 +1,7 @@
 import DodoPayments from "dodopayments";
 
 export type DodoEnvironment = "test_mode" | "live_mode";
-export type VelocePlanSlug = "pro" | "studio";
+export type VelocePlanSlug = "pro" | "studio" | "extra_slots_10";
 
 export const PLAN_CATALOG: Record<
   VelocePlanSlug,
@@ -16,7 +16,7 @@ export const PLAN_CATALOG: Record<
   pro: {
     name: "Veloce Pro Plan",
     description:
-      "Pro Discord Bot Hosting ($5.99/month) — Unlocks custom branding, custom bot status & presence, and unlimited commands.",
+      "Pro Discord Bot Hosting ($5.99/month) — Unlocks custom branding, custom bot status & presence, and up to 10 bots.",
     priceCents: 599,
     currency: "USD",
     taxCategory: "saas",
@@ -24,8 +24,16 @@ export const PLAN_CATALOG: Record<
   studio: {
     name: "Veloce Studio Plan",
     description:
-      "Studio Discord Bot Hosting ($14.99/month) — Full white-label bots, priority gateway workers, and unlimited servers.",
+      "Studio Discord Bot Hosting ($14.99/month) — Full white-label bots, priority gateway workers, and Studio capacity.",
     priceCents: 1499,
+    currency: "USD",
+    taxCategory: "saas",
+  },
+  extra_slots_10: {
+    name: "Veloce +10 Extra Bot Slots Expansion Pack",
+    description:
+      "Bot Capacity Expansion Pack ($4.99/month) — Adds +10 extra active Discord bot slots to your account.",
+    priceCents: 499,
     currency: "USD",
     taxCategory: "saas",
   },
@@ -45,6 +53,7 @@ export interface DodoRuntimeConfig {
   environment: DodoEnvironment;
   proProductId: string | null;
   studioProductId: string | null;
+  extraSlotsProductId: string | null;
 }
 
 export async function loadDodoRuntimeConfig(
@@ -55,6 +64,7 @@ export async function loadDodoRuntimeConfig(
     DODO_PAYMENTS_ENVIRONMENT?: string;
     DODO_PRODUCT_PRO_ID?: string;
     DODO_PRODUCT_STUDIO_ID?: string;
+    DODO_PRODUCT_EXTRA_SLOTS_ID?: string;
   }
 ): Promise<DodoRuntimeConfig> {
   const rows = await sql`SELECT key, value FROM dodo_config`.catch(() => []);
@@ -79,6 +89,8 @@ export async function loadDodoRuntimeConfig(
   );
   const proProductId = env.DODO_PRODUCT_PRO_ID || dbMap.pro_product_id || null;
   const studioProductId = env.DODO_PRODUCT_STUDIO_ID || dbMap.studio_product_id || null;
+  const extraSlotsProductId =
+    env.DODO_PRODUCT_EXTRA_SLOTS_ID || dbMap.extra_slots_product_id || null;
 
   return {
     apiKey,
@@ -86,6 +98,7 @@ export async function loadDodoRuntimeConfig(
     environment,
     proProductId,
     studioProductId,
+    extraSlotsProductId,
   };
 }
 
@@ -103,26 +116,38 @@ export function createDodoClient(config: {
 }
 
 /**
- * Ensures Veloce Pro ($5.99/mo) and Veloce Studio ($14.99/mo) recurring SaaS products
- * exist in the connected Dodo Payments account and caches their product IDs in dodo_config.
+ * Ensures Veloce Pro ($5.99/mo), Veloce Studio ($14.99/mo), and +10 Extra Bot Slots ($4.99/mo)
+ * recurring SaaS products exist in the connected Dodo Payments account.
  */
 export async function ensureDodoProducts(
   sql: any,
   config: DodoRuntimeConfig
-): Promise<{ proProductId: string; studioProductId: string; isLiveApi: boolean }> {
+): Promise<{
+  proProductId: string;
+  studioProductId: string;
+  extraSlotsProductId: string;
+  isLiveApi: boolean;
+}> {
   if (!config.apiKey) {
     return {
       proProductId: config.proProductId || "",
       studioProductId: config.studioProductId || "",
+      extraSlotsProductId: config.extraSlotsProductId || "",
       isLiveApi: false,
     };
   }
 
   let proId = config.proProductId;
   let studioId = config.studioProductId;
+  let extraSlotsId = config.extraSlotsProductId;
 
-  if (proId && studioId) {
-    return { proProductId: proId, studioProductId: studioId, isLiveApi: true };
+  if (proId && studioId && extraSlotsId) {
+    return {
+      proProductId: proId,
+      studioProductId: studioId,
+      extraSlotsProductId: extraSlotsId,
+      isLiveApi: true,
+    };
   }
 
   const client = createDodoClient(config);
@@ -135,6 +160,9 @@ export async function ensureDodoProducts(
       }
       if (!studioId && item.name === PLAN_CATALOG.studio.name) {
         studioId = item.product_id;
+      }
+      if (!extraSlotsId && item.name === PLAN_CATALOG.extra_slots_10.name) {
+        extraSlotsId = item.product_id;
       }
     }
   } catch (err) {
@@ -191,9 +219,35 @@ export async function ensureDodoProducts(
     `;
   }
 
+  if (!extraSlotsId) {
+    const createdExtra = await client.products.create({
+      name: PLAN_CATALOG.extra_slots_10.name,
+      description: PLAN_CATALOG.extra_slots_10.description,
+      tax_category: PLAN_CATALOG.extra_slots_10.taxCategory,
+      price: {
+        type: "recurring_price",
+        currency: PLAN_CATALOG.extra_slots_10.currency,
+        price: PLAN_CATALOG.extra_slots_10.priceCents,
+        discount: 0,
+        payment_frequency_count: 1,
+        payment_frequency_interval: "Month",
+        subscription_period_count: 1,
+        subscription_period_interval: "Month",
+        purchasing_power_parity: false,
+      },
+    });
+    extraSlotsId = createdExtra.product_id;
+    await sql`
+      INSERT INTO dodo_config (key, value, updated_at)
+      VALUES ('extra_slots_product_id', ${extraSlotsId}, NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `;
+  }
+
   return {
     proProductId: proId!,
     studioProductId: studioId!,
+    extraSlotsProductId: extraSlotsId!,
     isLiveApi: true,
   };
 }

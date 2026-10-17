@@ -21,6 +21,8 @@ import {
   Lock,
   CheckCircle2,
   X,
+  ShieldAlert,
+  Layers,
 } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -35,6 +37,7 @@ export default function AppsPage() {
   const { data: user, isLoading: authLoading, refetch: refetchUser } = useCurrentUser();
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [expansionModalOpen, setExpansionModalOpen] = useState(false);
   const [settingsApp, setSettingsApp] = useState<App | null>(null);
   const [settingsTab, setSettingsTab] = useState<"general" | "branding" | "credentials">("general");
   const [checklistDismissed, setChecklistDismissed] = useState(false);
@@ -45,7 +48,6 @@ export default function AppsPage() {
   const [editEnabled, setEditEnabled] = useState(true);
   const [editPublicKey, setEditPublicKey] = useState("");
   const [editToken, setEditToken] = useState("");
-  const [editPlan, setEditPlan] = useState<"free" | "pro" | "studio">("free");
   const [editCustomBranding, setEditCustomBranding] = useState(false);
   const [editPresenceStatus, setEditPresenceStatus] = useState<"online" | "idle" | "dnd" | "invisible">("online");
   const [editActivityType, setEditActivityType] = useState<number>(0);
@@ -57,23 +59,9 @@ export default function AppsPage() {
   const [customName, setCustomName] = useState("");
   const [publicKey, setPublicKey] = useState("");
 
-  // Dodo Payments Test Mode & Checkout State
-  const [dodoSelectedCard, setDodoSelectedCard] = useState<string>("4242424242424242");
-  const [dodoShowConfig, setDodoShowConfig] = useState(false);
-  const [dodoApiKeyInput, setDodoApiKeyInput] = useState("");
-  const [dodoWebhookKeyInput, setDodoWebhookKeyInput] = useState("");
-  const [lastWebhookResult, setLastWebhookResult] = useState<any>(null);
-
   const { data: apps, isLoading: appsLoading } = useQuery<App[]>({
     queryKey: ["apps-list"],
     queryFn: () => api.listApps(),
-    enabled: !!user,
-    retry: false,
-  });
-
-  const { data: billingStatus, refetch: refetchBillingStatus } = useQuery({
-    queryKey: ["dodo-billing-status"],
-    queryFn: () => api.getBillingStatus(),
     enabled: !!user,
     retry: false,
   });
@@ -86,97 +74,30 @@ export default function AppsPage() {
     setEditEnabled(app.enabled !== false);
     setEditPublicKey(app.discord_public_key || "");
     setEditToken("");
-    setEditPlan(app.plan || "free");
     setEditCustomBranding(!!app.custom_branding);
     setEditPresenceStatus((app.discord_status?.status as any) || "online");
     setEditActivityType(app.discord_status?.activity_type ?? 0);
     setEditActivityName(app.discord_status?.activity_name || "");
-    setLastWebhookResult(null);
   };
 
-  const dodoCheckoutMutation = useMutation({
-    mutationFn: async (plan: "pro" | "studio") => {
-      if (!settingsApp) throw new Error("No bot selected");
+  const checkoutMutation = useMutation({
+    mutationFn: async (params: { plan: "pro" | "studio" | "extra_slots_10"; appId?: string }) => {
       return api.createCheckoutSession({
-        app_id: settingsApp.id,
-        plan,
+        app_id: params.appId || settingsApp?.id || apps?.[0]?.id,
+        plan: params.plan,
         customer_email: user?.email,
         customer_name: user?.display_name,
       });
     },
     onSuccess: (session) => {
-      if (session.mode === "dodo_hosted" && session.checkout_url) {
-        toast.success("Redirecting to Dodo Payments Hosted Checkout (Test Mode)...");
+      if (session.checkout_url) {
         window.location.href = session.checkout_url;
       } else {
-        toast.info(
-          "Dodo Test Mode Checkout Session created! Use a Dodo Test Card below to complete payment and verify the webhook."
-        );
+        toast.error("Unable to open checkout session. Please try again.");
       }
     },
     onError: (err: any) => {
-      toast.error(err.message || "Failed to start Dodo checkout session");
-    },
-  });
-
-  const dodoTestWebhookMutation = useMutation({
-    mutationFn: async (payload: {
-      plan: "pro" | "studio";
-      scenario?: string;
-      card_number?: string;
-      upi_vpa?: string;
-    }) => {
-      if (!settingsApp) throw new Error("No bot selected");
-      return api.triggerTestWebhook({
-        app_id: settingsApp.id,
-        ...payload,
-      });
-    },
-    onSuccess: (res) => {
-      setLastWebhookResult(res);
-      if (res.app) {
-        setSettingsApp(res.app);
-        setEditPlan(res.app.plan || "free");
-        setEditCustomBranding(Boolean(res.app.custom_branding));
-      }
-      queryClient.invalidateQueries({ queryKey: ["apps-list"] });
-      refetchBillingStatus();
-      if (res.event_type === "subscription.active") {
-        toast.success(
-          `Dodo Webhook verified (${res.webhook_id}): Bot upgraded to ${(res.app?.plan || "pro").toUpperCase()} & custom branding unlocked!`
-        );
-      } else if (res.event_type === "payment.failed") {
-        toast.error(`Dodo Test Card Declined (${res.scenario}): ${res.event_type} webhook verified.`);
-      } else {
-        toast.info(`Dodo Webhook verified (${res.event_type}) for ${settingsApp?.name}`);
-      }
-    },
-    onError: (err: any) => {
-      toast.error(err.message || "Dodo test webhook failed");
-    },
-  });
-
-  const dodoConfigMutation = useMutation({
-    mutationFn: async () => {
-      return api.updateBillingConfig({
-        api_key: dodoApiKeyInput.trim() || undefined,
-        webhook_key: dodoWebhookKeyInput.trim() || undefined,
-        environment: "test_mode",
-      });
-    },
-    onSuccess: (res) => {
-      refetchBillingStatus();
-      setDodoApiKeyInput("");
-      setDodoWebhookKeyInput("");
-      setDodoShowConfig(false);
-      if (res.provisioning_error) {
-        toast.warning(`Saved config, but product auto-provisioning reported: ${res.provisioning_error}`);
-      } else {
-        toast.success("Dodo Payments Test Mode config saved & products verified!");
-      }
-    },
-    onError: (err: any) => {
-      toast.error(err.message || "Failed to update Dodo config");
+      toast.error(err.message || "Failed to start checkout session");
     },
   });
 
@@ -213,6 +134,11 @@ export default function AppsPage() {
       queryClient.invalidateQueries({ queryKey: ["apps-list"] });
     },
     onError: (err: any) => {
+      if (err?.status === 402 || err?.code === "FAIR_USE_LIMIT_REACHED") {
+        setModalOpen(false);
+        setExpansionModalOpen(true);
+        return;
+      }
       toast.error(err.message || "Failed to connect bot");
     },
   });
@@ -231,14 +157,17 @@ export default function AppsPage() {
         enabled: editEnabled,
         public_key: editPublicKey.trim(),
         token: editToken.trim() || undefined,
-        plan: editPlan,
-        custom_branding: (editPlan === "pro" || editPlan === "studio") ? editCustomBranding : false,
+        custom_branding:
+          settingsApp.plan === "pro" || settingsApp.plan === "studio"
+            ? editCustomBranding
+            : false,
         discord_status: statusPayload,
       });
     },
     onSuccess: (updated) => {
       toast.success("Bot settings saved");
       setSettingsApp(updated);
+      setEditToken("");
       queryClient.invalidateQueries({ queryKey: ["apps-list"] });
     },
     onError: (err: any) => {
@@ -284,7 +213,12 @@ export default function AppsPage() {
   }
 
   const primaryApp = apps && apps.length > 0 ? apps[0] : null;
-  const isPaidPlan = settingsApp?.plan === "pro" || settingsApp?.plan === "studio";
+  const isPaidPlan =
+    settingsApp?.plan === "pro" ||
+    settingsApp?.plan === "studio" ||
+    user?.plan === "pro" ||
+    user?.plan === "studio";
+  const isStaff = user?.role && user.role !== "USER";
 
   return (
     <>
@@ -312,6 +246,19 @@ export default function AppsPage() {
 
           <div className="flex items-center gap-2 sm:gap-3">
             <ThemeSwitch />
+
+            {isStaff && (
+              <Link
+                href="/super-admin"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-400 text-xs font-semibold transition"
+              >
+                <ShieldAlert className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Staff Panel</span>
+                <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 font-mono">
+                  {user?.role}
+                </span>
+              </Link>
+            )}
 
             {user && (
               <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-card border border-border text-xs">
@@ -358,9 +305,20 @@ export default function AppsPage() {
                 Invite your bot to a server, configure custom branding &amp; status, or open the visual Flow Builder.
               </p>
             </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setExpansionModalOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-card hover:bg-accent border border-border text-xs font-semibold text-foreground transition shadow-sm"
+              >
+                <Layers className="w-3.5 h-3.5 text-primary" />
+                <span>Buy +10 Bot Slots ($4.99/mo)</span>
+              </button>
+            </div>
           </div>
 
-          {/* Setup Checklist Banner (Inspired by reference benchmark) */}
+          {/* Setup Checklist Banner */}
           {primaryApp && !checklistDismissed && (
             <div className="mb-8 rounded-2xl bg-card border border-border p-5 sm:p-6 shadow-sm">
               <div className="flex items-start justify-between gap-4 mb-4">
@@ -495,7 +453,7 @@ export default function AppsPage() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 sm:gap-6">
               {apps.map((app) => {
-                const appPlan = app.plan || "free";
+                const appPlan = app.plan || user?.plan || "free";
                 const hasCustomBranding =
                   (appPlan === "pro" || appPlan === "studio") && !!app.custom_branding;
 
@@ -577,7 +535,7 @@ export default function AppsPage() {
                           className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline"
                         >
                           <Crown className="w-3 h-3" />
-                          {hasCustomBranding ? "Manage" : "Remove Watermark"}
+                          {hasCustomBranding ? "Manage" : "Upgrade"}
                         </button>
                       </div>
 
@@ -711,37 +669,33 @@ export default function AppsPage() {
                 </div>
 
                 {createAppMutation.isError && (
-                  <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs space-y-2">
+                  <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs space-y-2.5">
                     <div className="font-semibold text-amber-400 flex items-center gap-1.5">
                       <Crown className="w-3.5 h-3.5 shrink-0" />
-                      <span>
-                        {(createAppMutation.error as any)?.code === "FAIR_USE_LIMIT_REACHED"
-                          ? "Studio Fair Use Allocation Reached"
-                          : "Bot Slot Allocation Reached"}
-                      </span>
+                      <span>Bot Slot Allocation Reached</span>
                     </div>
                     <p className="text-muted-foreground leading-relaxed">
                       {(createAppMutation.error as any)?.message ||
-                        "You have reached your current bot slot allocation."}
+                        "You have reached your current plan's bot limit. Upgrade your plan or add a capacity expansion pack to connect more bots."}
                     </p>
-                    {apps && apps.length > 0 && (
+                    <div className="flex flex-wrap gap-2 pt-1">
                       <button
                         type="button"
-                        onClick={() => {
-                          setModalOpen(false);
-                          createAppMutation.reset();
-                          openSettingsModal(apps[0], "branding");
-                        }}
+                        onClick={() => checkoutMutation.mutate({ plan: "pro" })}
+                        disabled={checkoutMutation.isPending}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground font-semibold text-[11px] shadow-sm hover:opacity-95 transition"
                       >
-                        <Sparkles className="w-3 h-3" />
-                        <span>
-                          {(createAppMutation.error as any)?.code === "FAIR_USE_LIMIT_REACHED"
-                            ? "Add Extra Bot Slots"
-                            : "Upgrade Plan"}
-                        </span>
+                        Upgrade to Pro ($5.99/mo)
                       </button>
-                    )}
+                      <button
+                        type="button"
+                        onClick={() => checkoutMutation.mutate({ plan: "studio" })}
+                        disabled={checkoutMutation.isPending}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 text-black font-semibold text-[11px] shadow-sm hover:opacity-95 transition"
+                      >
+                        Upgrade to Studio ($14.99/mo)
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -770,7 +724,78 @@ export default function AppsPage() {
           </div>
         )}
 
-        {/* Comprehensive Bot Settings, Presence & Branding Modal */}
+        {/* Self-Serve Bot Capacity Expansion Pack Modal (Triggered on 402 FAIR_USE_LIMIT_REACHED or Header Button) */}
+        {expansionModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-150">
+            <div className="w-[calc(100vw-2rem)] max-w-md rounded-2xl bg-card border border-primary/40 p-6 shadow-2xl relative">
+              <button
+                type="button"
+                onClick={() => setExpansionModalOpen(false)}
+                className="absolute top-4 right-4 p-1.5 rounded-lg text-muted-foreground hover:text-foreground"
+              >
+                <X className="w-4 h-4" />
+              </button>
+
+              <div className="w-11 h-11 rounded-2xl bg-primary/15 border border-primary/30 text-primary flex items-center justify-center mb-4">
+                <Layers className="w-5 h-5" />
+              </div>
+
+              <h3 className="text-lg font-bold text-foreground">
+                Bot Capacity Expansion Pack
+              </h3>
+              <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">
+                Need to host more active Discord bots on your account? Add instant capacity packs to your workspace at any time.
+              </p>
+
+              <div className="mt-5 p-4 rounded-xl bg-background border border-primary/30 flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-sm font-bold text-foreground">
+                    +10 Extra Bot Slots
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-0.5">
+                    Instant activation via verified checkout · Stackable anytime
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="text-lg font-extrabold text-primary">$4.99</div>
+                  <div className="text-[10px] text-muted-foreground">/month</div>
+                </div>
+              </div>
+
+              <div className="mt-4 text-[11px] text-muted-foreground flex items-center justify-between px-1">
+                <span>Current Extra Bot Slots:</span>
+                <span className="font-mono font-bold text-foreground">
+                  +{user?.extra_bot_slots || 0} slots
+                </span>
+              </div>
+
+              <div className="mt-6 flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setExpansionModalOpen(false)}
+                  className="px-3.5 py-2 text-xs font-medium rounded-lg text-muted-foreground hover:text-foreground transition"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  disabled={checkoutMutation.isPending}
+                  onClick={() => checkoutMutation.mutate({ plan: "extra_slots_10" })}
+                  className="px-4 py-2.5 text-xs font-semibold rounded-xl bg-primary hover:opacity-95 disabled:opacity-50 text-primary-foreground shadow-lg shadow-primary/25 transition inline-flex items-center gap-1.5"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>
+                    {checkoutMutation.isPending
+                      ? "Opening Checkout..."
+                      : "Buy +10 Bot Slots ($4.99/mo)"}
+                  </span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Bot Settings, Presence & Plan Modal */}
         {settingsApp && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-150">
             <div className="w-[calc(100vw-1.5rem)] max-w-xl rounded-2xl bg-card border border-border p-5 sm:p-6 shadow-2xl relative max-h-[90vh] overflow-y-auto">
@@ -908,303 +933,58 @@ export default function AppsPage() {
 
               {settingsTab === "branding" && (
                 <div className="space-y-4 text-xs">
-                  {/* Dodo Payments Test Mode Banner */}
-                  <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2.5">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-400 font-mono font-bold text-[10px] uppercase tracking-wider border border-amber-500/30">
-                          Dodo Payments · {billingStatus?.environment === "live_mode" ? "LIVE MODE" : "TEST MODE"}
-                        </span>
-                        <span className="text-[11px] text-muted-foreground font-mono">
-                          {billingStatus?.base_url || "https://test.dodopayments.com"}
-                        </span>
+                  {/* Clean Subscription & Capacity Actions */}
+                  <div className="p-4 rounded-xl bg-background border border-border space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="font-bold text-foreground">Current Subscription</div>
+                        <div className="text-[11px] text-muted-foreground mt-0.5">
+                          Upgrade anytime to unlock custom branding, white-label status, and more bot slots.
+                        </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setDodoShowConfig((v) => !v)}
-                        className="text-[11px] font-semibold text-primary hover:underline"
-                      >
-                        {dodoShowConfig
-                          ? "Hide API Key Setup"
-                          : billingStatus?.api_key_configured
-                          ? `Key Connected (${billingStatus.api_key_masked})`
-                          : "Connect dodo_test_... Key"}
-                      </button>
+                      <span className="px-2.5 py-1 rounded-full text-[11px] font-bold uppercase bg-primary/15 text-primary border border-primary/30">
+                        {settingsApp.plan || user?.plan || "starter"}
+                      </span>
                     </div>
 
-                    {settingsApp.dodo_subscription_id && (
-                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-amber-500/20 text-[11px]">
-                        <div className="flex items-center gap-2">
-                          <span className="text-muted-foreground">Subscription:</span>
-                          <code className="font-mono text-foreground bg-background/80 px-1.5 py-0.5 rounded border border-border">
-                            {settingsApp.dodo_subscription_id}
-                          </code>
-                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold uppercase text-[10px]">
-                            {settingsApp.subscription_status || "active"}
-                          </span>
-                          {settingsApp.cancel_at_next_billing_date && (
-                            <span className="text-amber-400 text-[10px]">
-                              (Cancels at period end)
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {dodoShowConfig && (
-                      <div className="pt-2.5 border-t border-amber-500/20 space-y-2.5">
-                        <div>
-                          <label className="block text-[11px] font-medium text-foreground mb-1">
-                            Dodo Payments Test API Key (Optional — for hosted redirect on test.checkout.dodopayments.com)
-                          </label>
-                          <input
-                            type="password"
-                            placeholder="dodo_test_..."
-                            value={dodoApiKeyInput}
-                            onChange={(e) => setDodoApiKeyInput(e.target.value)}
-                            className="w-full bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs font-mono text-foreground"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] font-medium text-foreground mb-1">
-                            Dodo Webhook Signing Secret (Standard Webhooks whsec_...)
-                          </label>
-                          <input
-                            type="password"
-                            placeholder="whsec_..."
-                            value={dodoWebhookKeyInput}
-                            onChange={(e) => setDodoWebhookKeyInput(e.target.value)}
-                            className="w-full bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs font-mono text-foreground"
-                          />
-                        </div>
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-[10px] text-muted-foreground truncate">
-                            Webhook URL: <code className="font-mono">{billingStatus?.webhook_endpoint}</code>
-                          </span>
-                          <button
-                            type="button"
-                            disabled={dodoConfigMutation.isPending}
-                            onClick={() => dodoConfigMutation.mutate()}
-                            className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-[11px] font-semibold shrink-0"
-                          >
-                            {dodoConfigMutation.isPending ? "Saving..." : "Save Dodo Config"}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Plan Selector */}
-                  <div>
-                    <label className="font-semibold text-foreground block mb-2">
-                      Select Subscription Tier
-                    </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
                       <button
                         type="button"
-                        onClick={() => {
-                          setEditPlan("free");
-                          setEditCustomBranding(false);
-                        }}
-                        className={`p-3 rounded-xl border text-left transition ${
-                          editPlan === "free"
-                            ? "border-primary bg-primary/10"
-                            : "border-border bg-background hover:border-primary/40"
-                        }`}
+                        disabled={checkoutMutation.isPending}
+                        onClick={() =>
+                          checkoutMutation.mutate({ plan: "pro", appId: settingsApp.id })
+                        }
+                        className="py-2.5 px-3 rounded-xl bg-primary hover:opacity-95 disabled:opacity-50 text-primary-foreground font-semibold text-xs shadow transition text-center"
                       >
-                        <div className="font-bold text-foreground">Starter</div>
-                        <div className="text-base font-extrabold text-foreground mt-0.5">$0</div>
-                        <div className="text-[10px] text-muted-foreground mt-1">
-                          Includes Veloce Branding
-                        </div>
+                        Upgrade to Pro ($5.99/mo)
                       </button>
 
                       <button
                         type="button"
-                        onClick={() => {
-                          setEditPlan("pro");
-                          setEditCustomBranding(true);
-                        }}
-                        className={`p-3 rounded-xl border text-left transition relative ${
-                          editPlan === "pro"
-                            ? "border-primary bg-primary/10 ring-1 ring-primary"
-                            : "border-border bg-background hover:border-primary/40"
-                        }`}
+                        disabled={checkoutMutation.isPending}
+                        onClick={() =>
+                          checkoutMutation.mutate({ plan: "studio", appId: settingsApp.id })
+                        }
+                        className="py-2.5 px-3 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-black font-semibold text-xs shadow transition text-center"
                       >
-                        <span className="absolute top-2 right-2 text-[9px] font-bold px-1.5 py-0.5 rounded bg-primary text-primary-foreground">
-                          POPULAR
-                        </span>
-                        <div className="font-bold text-foreground">Pro</div>
-                        <div className="text-base font-extrabold text-primary mt-0.5">
-                          $5.99<span className="text-[10px] font-normal text-muted-foreground">/mo</span>
-                        </div>
-                        <div className="text-[10px] text-muted-foreground mt-1">
-                          Unlocks Custom Branding
-                        </div>
+                        Upgrade to Studio ($14.99/mo)
                       </button>
 
                       <button
                         type="button"
-                        onClick={() => {
-                          setEditPlan("studio");
-                          setEditCustomBranding(true);
-                        }}
-                        className={`p-3 rounded-xl border text-left transition ${
-                          editPlan === "studio"
-                            ? "border-primary bg-primary/10 ring-1 ring-primary"
-                            : "border-border bg-background hover:border-primary/40"
-                        }`}
+                        disabled={checkoutMutation.isPending}
+                        onClick={() =>
+                          checkoutMutation.mutate({
+                            plan: "extra_slots_10",
+                            appId: settingsApp.id,
+                          })
+                        }
+                        className="py-2.5 px-3 rounded-xl bg-secondary hover:bg-accent disabled:opacity-50 text-foreground border border-border font-semibold text-xs transition text-center"
                       >
-                        <div className="font-bold text-foreground">Studio</div>
-                        <div className="text-base font-extrabold text-primary mt-0.5">
-                          $14.99<span className="text-[10px] font-normal text-muted-foreground">/mo</span>
-                        </div>
-                        <div className="text-[10px] text-muted-foreground mt-1">
-                          White-Label &amp; Unlimited
-                        </div>
+                        Buy +10 Bot Slots ($4.99/mo)
                       </button>
                     </div>
                   </div>
-
-                  {/* Dodo Payments Test Mode Checkout & Card Simulator */}
-                  {(editPlan === "pro" || editPlan === "studio") && (
-                    <div className="p-4 rounded-xl bg-background border border-primary/40 space-y-3">
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <div>
-                          <div className="font-bold text-foreground flex items-center gap-1.5">
-                            <Sparkles className="w-4 h-4 text-primary" />
-                            <span>
-                              Dodo Payments Test Mode Checkout —{" "}
-                              {editPlan === "studio" ? "Studio ($14.99/mo)" : "Pro ($5.99/mo)"}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-muted-foreground mt-0.5">
-                            Test card success/decline scenarios, UPI, renewals, and verified Standard Webhooks (`client.webhooks.unwrap()`).
-                          </p>
-                        </div>
-
-                        {billingStatus?.api_key_configured && (
-                          <button
-                            type="button"
-                            disabled={dodoCheckoutMutation.isPending}
-                            onClick={() => dodoCheckoutMutation.mutate(editPlan)}
-                            className="px-3 py-2 rounded-lg bg-secondary hover:bg-accent text-foreground border border-border font-semibold text-[11px] inline-flex items-center gap-1.5 shrink-0"
-                          >
-                            <span>Hosted Checkout</span>
-                            <ExternalLink className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
-                        <div className="sm:col-span-8">
-                          <label className="block text-[11px] text-muted-foreground mb-1">
-                            Official Dodo Test Card / Payment Method (Exp 06/32 · CVV 123)
-                          </label>
-                          <select
-                            value={dodoSelectedCard}
-                            onChange={(e) => setDodoSelectedCard(e.target.value)}
-                            className="w-full bg-card border border-border rounded-lg px-2.5 py-2 text-xs text-foreground font-mono"
-                          >
-                            <option value="4242424242424242">
-                              4242 4242 4242 4242 — Success (subscription.active)
-                            </option>
-                            <option value="4000000000000002">
-                              4000 0000 0000 0002 — Decline (payment.failed)
-                            </option>
-                            <option value="4000000000009995">
-                              4000 0000 0000 9995 — Insufficient Funds (payment.failed)
-                            </option>
-                            <option value="4000000000000341">
-                              4000 0000 0000 0341 — Renewal Failure (subscription.on_hold)
-                            </option>
-                            <option value="success@upi">
-                              success@upi — UPI Payment Success (subscription.active)
-                            </option>
-                            <option value="failure@upi">
-                              failure@upi — UPI Payment Failure (payment.failed)
-                            </option>
-                          </select>
-                        </div>
-
-                        <div className="sm:col-span-4">
-                          <button
-                            type="button"
-                            disabled={dodoTestWebhookMutation.isPending}
-                            onClick={() => {
-                              const isUpi = dodoSelectedCard.includes("@upi");
-                              dodoTestWebhookMutation.mutate({
-                                plan: editPlan,
-                                ...(isUpi
-                                  ? { upi_vpa: dodoSelectedCard }
-                                  : { card_number: dodoSelectedCard }),
-                              });
-                            }}
-                            className="w-full py-2 px-3 rounded-lg bg-primary hover:opacity-95 disabled:opacity-50 text-primary-foreground font-semibold text-xs shadow transition"
-                          >
-                            {dodoTestWebhookMutation.isPending
-                              ? "Verifying Webhook..."
-                              : `Pay ${editPlan === "studio" ? "$14.99" : "$5.99"} (Test)`}
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Lifecycle Webhook Simulators (Cancel at period end / Refund) */}
-                      {isPaidPlan && (
-                        <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-border">
-                          <span className="text-[11px] text-muted-foreground">
-                            Test Subscription Lifecycle:
-                          </span>
-                          <button
-                            type="button"
-                            disabled={dodoTestWebhookMutation.isPending}
-                            onClick={() =>
-                              dodoTestWebhookMutation.mutate({
-                                plan: (settingsApp.plan as "pro" | "studio") || "pro",
-                                scenario: "cancel_period_end",
-                              })
-                            }
-                            className="px-2.5 py-1 rounded-md bg-secondary hover:bg-accent text-foreground border border-border text-[11px] font-medium transition"
-                          >
-                            Cancel at Period End
-                          </button>
-                          <button
-                            type="button"
-                            disabled={dodoTestWebhookMutation.isPending}
-                            onClick={() =>
-                              dodoTestWebhookMutation.mutate({
-                                plan: (settingsApp.plan as "pro" | "studio") || "pro",
-                                scenario: "refund",
-                              })
-                            }
-                            className="px-2.5 py-1 rounded-md bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/25 text-[11px] font-medium transition"
-                          >
-                            Simulate 14-Day Refund (refund.succeeded)
-                          </button>
-                        </div>
-                      )}
-
-                      {lastWebhookResult && (
-                        <div className="p-2.5 rounded-lg bg-card border border-border font-mono text-[11px] space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-emerald-400 font-semibold">
-                              ✓ Standard Webhooks Signature Verified (client.webhooks.unwrap)
-                            </span>
-                            <span className="text-muted-foreground">
-                              {lastWebhookResult.webhook_id}
-                            </span>
-                          </div>
-                          <div className="text-muted-foreground">
-                            Event: <span className="text-foreground font-semibold">{lastWebhookResult.event_type}</span> · Scenario:{" "}
-                            <span className="text-foreground">{lastWebhookResult.scenario}</span> · Active Plan:{" "}
-                            <span className="text-primary font-bold uppercase">
-                              {lastWebhookResult.app?.plan || settingsApp.plan}
-                            </span>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
 
                   {/* Custom Branding Toggle (Locked on Free Plan) */}
                   <div
@@ -1222,8 +1002,8 @@ export default function AppsPage() {
                         </div>
                         <p className="text-[11px] text-muted-foreground mt-0.5">
                           {isPaidPlan
-                            ? "Custom branding unlocked via Dodo Payments! Your bot replies and status are 100% white-labeled."
-                            : "Free bots show '⚡ Powered by Veloce' on bot status and replies. Complete a Dodo Payments Test Checkout above to unlock custom branding."}
+                            ? "Custom branding unlocked! Your bot replies and status are 100% white-labeled."
+                            : "Free bots show '⚡ Powered by Veloce' on bot status and replies. Upgrade to Pro ($5.99/mo) or Studio ($14.99/mo) above to unlock custom branding."}
                         </p>
                       </div>
                       <input
@@ -1323,16 +1103,26 @@ export default function AppsPage() {
                   </div>
 
                   <div>
-                    <label className="font-semibold text-foreground block mb-1.5">
-                      Update Bot Token (Leave blank to keep current token)
-                    </label>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="font-semibold text-foreground">
+                        Bot Token (Encrypted &amp; Masked)
+                      </label>
+                      {settingsApp.has_token && (
+                        <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                          Active: {settingsApp.token_preview || "MTI0...****"}
+                        </span>
+                      )}
+                    </div>
                     <input
                       type="password"
                       value={editToken}
                       onChange={(e) => setEditToken(e.target.value)}
-                      placeholder="New Discord Bot Token..."
+                      placeholder="Paste new token to rotate (leave blank to keep current)"
                       className="w-full bg-background border border-border rounded-lg px-3 py-2 text-xs text-foreground font-mono focus:outline-none focus:border-primary"
                     />
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      For security, raw bot tokens are never returned to the browser after connection.
+                    </p>
                   </div>
                 </div>
               )}

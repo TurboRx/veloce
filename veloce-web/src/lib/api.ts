@@ -14,7 +14,7 @@ export function getApiUrl(path?: string): string {
 }
 
 export function getLoginUrl(redirect = "/apps"): string {
-  return getApiUrl(`/v1/auth/login?redirect=${encodeURIComponent(redirect)}`);
+  return getApiUrl(`/api/auth/discord?redirect=${encodeURIComponent(redirect)}`);
 }
 
 export const loginUrl = getLoginUrl("/apps");
@@ -29,13 +29,19 @@ export function getAppInviteUrl(
   return `https://discord.com/oauth2/authorize?client_id=${discordId}&integration_type=0&scope=bot%20applications.commands&permissions=8`;
 }
 
+export type StaffRole = "FOUNDER" | "ADMIN" | "MODERATOR" | "SUPPORT" | "USER";
+
 export interface User {
   id: string;
   email: string;
   display_name: string;
   discord_id: string;
   discord_username: string;
-  discord_avatar?: string;
+  discord_avatar?: string | null;
+  role: StaffRole;
+  plan: "free" | "pro" | "studio";
+  extra_bot_slots: number;
+  is_banned: boolean;
   created_at: string;
 }
 
@@ -47,6 +53,7 @@ export interface AppDiscordStatus {
 
 export interface App {
   id: string;
+  user_id?: string;
   owner_user_id: string;
   name: string;
   description?: string;
@@ -54,6 +61,8 @@ export interface App {
   discord_id: string;
   discord_public_key?: string;
   discord_avatar?: string;
+  has_token?: boolean;
+  token_preview?: string | null;
   plan?: "free" | "pro" | "studio";
   custom_branding?: boolean;
   discord_status?: AppDiscordStatus;
@@ -65,24 +74,6 @@ export interface App {
   created_at: string;
   updated_at: string;
 }
-
-export interface DodoBillingStatus {
-  environment: "test_mode" | "live_mode";
-  base_url: string;
-  api_key_configured: boolean;
-  api_key_masked?: string | null;
-  webhook_key_configured: boolean;
-  pro_product_id: string;
-  studio_product_id: string;
-  webhook_endpoint: string;
-  recent_webhooks: Array<{
-    webhook_id: string;
-    event_type: string;
-    app_id?: string;
-    created_at: string;
-  }>;
-}
-
 
 export type FlowNodeType =
   | "entry_command"
@@ -190,6 +181,78 @@ export interface Guild {
   owner_id?: string;
 }
 
+export interface AdminUserRecord {
+  id: string;
+  email: string;
+  display_name: string;
+  discord_id: string;
+  discord_username: string;
+  discord_avatar?: string | null;
+  role: StaffRole;
+  plan: "free" | "pro" | "studio";
+  extra_bot_slots: number;
+  is_banned: boolean;
+  bot_count: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface AdminBotRecord {
+  id: string;
+  user_id: string;
+  owner_user_id: string;
+  owner_username?: string;
+  owner_display_name?: string;
+  name: string;
+  description?: string;
+  enabled: boolean;
+  discord_id: string;
+  discord_avatar?: string | null;
+  plan: "free" | "pro" | "studio";
+  custom_branding: boolean;
+  has_token: boolean;
+  token_preview: string | null;
+  command_count: number;
+  error_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminAbuseItem {
+  app_id: string;
+  bot_name: string;
+  bot_discord_id: string;
+  enabled: boolean;
+  owner_discord_id: string;
+  owner_username?: string;
+  owner_banned?: boolean;
+  total_events_1h: number;
+  rate_limit_429_count: number;
+  error_count: number;
+  last_activity_at: string;
+}
+
+export interface StaffAuditLogRecord {
+  id: number;
+  actor_discord_id: string;
+  actor_username: string;
+  actor_role: StaffRole;
+  target_id: string;
+  action_type: string;
+  details?: Record<string, any>;
+  ip_address: string;
+  created_at: string;
+}
+
+export interface AdminOverviewResponse {
+  viewer: User;
+  founder_discord_id: string;
+  users: AdminUserRecord[];
+  bots: AdminBotRecord[];
+  abuse_radar: AdminAbuseItem[];
+  audit_logs: StaffAuditLogRecord[];
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = getApiUrl(path);
   const res = await fetch(url, {
@@ -212,7 +275,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     } catch {
       // ignore
     }
-    const err = new Error(errorMsg) as Error & { code?: string };
+    const err = new Error(errorMsg) as Error & { code?: string; status?: number };
+    err.status = res.status;
     if (errorCode) err.code = errorCode;
     throw err;
   }
@@ -221,14 +285,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  getCurrentUser: () => request<User>("/v1/user/@me"),
-  logout: () => request<{ success: boolean }>("/v1/auth/logout", { method: "POST" }),
+  getCurrentUser: () => request<User>("/api/auth/me"),
+  logout: () => request<{ success: boolean }>("/api/auth/logout", { method: "POST" }),
 
-  // Apps
-  listApps: () => request<App[]>("/v1/apps"),
-  getApp: (id: string) => request<App>(`/v1/apps/${id}`),
+  // Bots / Apps (strictly scoped to verified session user)
+  listApps: () => request<App[]>("/api/bots"),
+  getApp: (id: string) => request<App>(`/api/bots/${id}`),
   createApp: (data: { token: string; name?: string; public_key?: string }) =>
-    request<App>("/v1/apps", { method: "POST", body: JSON.stringify(data) }),
+    request<App>("/api/bots", { method: "POST", body: JSON.stringify(data) }),
   updateApp: (
     id: string,
     data: {
@@ -237,13 +301,11 @@ export const api = {
       enabled?: boolean;
       public_key?: string;
       token?: string;
-      plan?: "free" | "pro" | "studio";
       custom_branding?: boolean;
       discord_status?: AppDiscordStatus;
     }
-  ) => request<App>(`/v1/apps/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-  deleteApp: (id: string) => request<{ success: boolean }>(`/v1/apps/${id}`, { method: "DELETE" }),
-
+  ) => request<App>(`/api/bots/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  deleteApp: (id: string) => request<{ success: boolean }>(`/api/bots/${id}`, { method: "DELETE" }),
 
   // Commands
   listCommands: (appId: string) => request<Command[]>(`/v1/apps/${appId}/commands`),
@@ -316,30 +378,13 @@ export const api = {
   listGuilds: (appId: string) =>
     request<Guild[]>(`/v1/apps/${appId}/guilds`),
 
-  // Dodo Payments Billing & Test Mode
-  getBillingStatus: () => request<DodoBillingStatus>("/v1/billing/status"),
-  updateBillingConfig: (data: {
-    api_key?: string;
-    webhook_key?: string;
-    environment?: "test_mode" | "live_mode";
-    pro_product_id?: string;
-    studio_product_id?: string;
-  }) =>
-    request<{
-      success: boolean;
-      environment: string;
-      api_key_configured: boolean;
-      pro_product_id: string;
-      studio_product_id: string;
-      provisioning_error?: string | null;
-    }>("/v1/billing/config", { method: "POST", body: JSON.stringify(data) }),
+  // Dodo Payments Checkout & Billing Portal
   createCheckoutSession: (data: {
-    app_id: string;
-    plan: "pro" | "studio";
+    app_id?: string;
+    plan: "pro" | "studio" | "extra_slots_10";
     customer_email?: string;
     customer_name?: string;
     discount_code?: string;
-    force_sandbox?: boolean;
   }) =>
     request<{
       mode: "dodo_hosted" | "dodo_test_sandbox";
@@ -347,7 +392,7 @@ export const api = {
       session_id: string;
       checkout_url: string;
       product_id: string;
-      plan: "pro" | "studio";
+      plan: "pro" | "studio" | "extra_slots_10";
       amount_cents?: number;
     }>("/v1/billing/checkout", { method: "POST", body: JSON.stringify(data) }),
   createPortalSession: (appId: string) =>
@@ -355,20 +400,47 @@ export const api = {
       "/v1/billing/portal",
       { method: "POST", body: JSON.stringify({ app_id: appId }) }
     ),
-  triggerTestWebhook: (data: {
-    app_id: string;
-    plan: "pro" | "studio";
-    scenario?: string;
-    card_number?: string;
-    upi_vpa?: string;
-  }) =>
-    request<{
-      success: boolean;
-      scenario: string;
-      webhook_id: string;
-      event_type: string;
-      signature_verified: boolean;
-      webhook_result: any;
-      app: App | null;
-    }>("/v1/billing/test-webhook", { method: "POST", body: JSON.stringify(data) }),
+
+  // Multi-Rank Super Admin & Staff Panel Endpoints (/api/admin/*)
+  getAdminOverview: () => request<AdminOverviewResponse>("/api/admin/overview"),
+  assignStaffRole: (data: { discord_id: string; role: StaffRole; username?: string }) =>
+    request<{ success: boolean; user: AdminUserRecord }>("/api/admin/staff/role", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  getAdminBotLogs: (botId: string) => request<Log[]>(`/api/admin/bots/${botId}/logs`),
+  suspendAdminBot: (botId: string, enabled: boolean) =>
+    request<{ success: boolean; bot: App }>(`/api/admin/bots/${botId}/suspend`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+  revealBotToken: (botId: string) =>
+    request<{ bot_id: string; bot_name: string; discord_id: string; bot_token: string | null }>(
+      `/api/admin/bots/${botId}/reveal-token`,
+      { method: "POST" }
+    ),
+  purgeAdminBot: (botId: string) =>
+    request<{ success: boolean; deleted_bot_id: string }>(`/api/admin/bots/${botId}`, {
+      method: "DELETE",
+    }),
+  overrideAdminUser: (
+    discordId: string,
+    data: {
+      plan?: "free" | "pro" | "studio";
+      extra_bot_slots?: number;
+      is_banned?: boolean;
+    }
+  ) =>
+    request<{ success: boolean; user: AdminUserRecord }>(`/api/admin/users/${discordId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  emergencyBanAndPurge: (discordId: string, reason?: string) =>
+    request<{ success: boolean; discord_id: string; purged_bots_count: number }>(
+      "/api/admin/abuse/ban-and-purge",
+      {
+        method: "POST",
+        body: JSON.stringify({ discord_id: discordId, reason }),
+      }
+    ),
 };

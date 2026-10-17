@@ -136,20 +136,21 @@ export default function TermsPage() {
               To ensure high availability, edge performance, and compliance with Discord&apos;s
               Gateway and REST API rate limits for all customers, &quot;Unlimited&quot; subscription
               tiers (including the <strong className="text-foreground">Studio</strong> plan) are
-              governed by a <strong className="text-foreground">Fair Use soft cap of 30 active bots</strong>{" "}
-              per account alongside standard Cloudflare Edge execution quotas to prevent platform
-              abuse, token farming, and Discord API rate-limit violations.
+              subject to a <strong className="text-foreground">30-bot Fair Use baseline</strong>{" "}
+              per account (expandable at any time via self-serve{" "}
+              <strong className="text-foreground">+10 Extra Bot Slots</strong> capacity add-ons)
+              alongside standard Cloudflare Edge execution quotas to prevent platform abuse, token
+              farming, and Discord API rate-limit violations.
             </p>
             <p>
-              Users whose legitimate operations exceed the 30-bot Fair Use allocation must purchase
+              Users whose legitimate operations exceed the 30-bot Fair Use baseline may purchase
               additional capacity add-on packs (
               <code className="font-mono text-xs bg-card px-1.5 py-0.5 rounded border border-border text-foreground">
                 extra_bot_slots
               </code>
-              ) or contact support for custom enterprise provisioning. Veloce reserves the sole right
-              to throttle, restrict, or permanently suspend any account or bot engaging in mass
-              bot-token automation, server raids, spam, or abusive resource consumption without prior
-              notice or refund.
+              ) directly from their dashboard. Veloce reserves the sole right to throttle, restrict,
+              permanently suspend accounts, or revoke and purge bot tokens involved in server raids,
+              mass bot-token automation, spam, or Discord API abuse without prior notice or refund.
             </p>
           </section>
 

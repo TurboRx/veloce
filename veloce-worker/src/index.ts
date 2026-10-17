@@ -12,9 +12,25 @@ import {
   signStandardWebhookPayload,
   VelocePlanSlug,
 } from "./dodo";
+import {
+  AuthenticatedUser,
+  createSignedOAuthState,
+  DEFAULT_FOUNDER_DISCORD_ID,
+  hasRequiredRole,
+  maskBotToken,
+  normalizeStaffRole,
+  resolveDiscordOAuthCredentials,
+  resolveSessionSecret,
+  signSessionToken,
+  StaffRole,
+  verifySessionToken,
+  verifySignedOAuthState,
+} from "./auth";
 
 export interface Env {
   DATABASE_URL: string;
+  SESSION_SECRET?: string;
+  FOUNDER_DISCORD_ID?: string;
   TOKEN_ENCRYPTION_KEY?: string;
   ALLOWED_ORIGINS?: string;
   DISCORD_CLIENT_ID?: string;
@@ -24,6 +40,7 @@ export interface Env {
   DODO_PAYMENTS_ENVIRONMENT?: string;
   DODO_PRODUCT_PRO_ID?: string;
   DODO_PRODUCT_STUDIO_ID?: string;
+  DODO_PRODUCT_EXTRA_SLOTS_ID?: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -33,7 +50,7 @@ const activeGatewaySessions = new Map<string, number>();
 const activeGatewaySockets = new Map<string, WebSocket>();
 let schemaMigrated = false;
 
-// Silent backend Fair Use & Plan Bot Creation Limits
+// Tier Bot Creation Limits
 const STARTER_LIMIT = 2;
 const PRO_LIMIT = 10;
 const STUDIO_BOT_SOFT_LIMIT = 30;
@@ -88,11 +105,26 @@ function getPublicOrigin(c: any): string {
   return url.origin;
 }
 
+function getClientIp(c: any): string {
+  return (
+    c.req.header("cf-connecting-ip") ||
+    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "0.0.0.0"
+  );
+}
+
 async function ensureSchema(sql: any) {
   if (schemaMigrated) return;
   try {
+    // Users RBAC & quota columns
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'USER'`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'free'`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS extra_bot_slots INTEGER NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT false`;
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_reason TEXT`;
+
+    // Bots (apps) user isolation & billing columns
+    await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS user_id TEXT`;
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'free'`;
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS custom_branding BOOLEAN NOT NULL DEFAULT false`;
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS discord_status JSONB`;
@@ -101,6 +133,45 @@ async function ensureSchema(sql: any) {
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS subscription_status TEXT NOT NULL DEFAULT 'none'`;
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS cancel_at_next_billing_date BOOLEAN NOT NULL DEFAULT false`;
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS next_billing_date TIMESTAMPTZ`;
+
+    // Commands, events, logs user_id columns
+    await sql`ALTER TABLE commands ADD COLUMN IF NOT EXISTS user_id TEXT`;
+    await sql`ALTER TABLE event_listeners ADD COLUMN IF NOT EXISTS user_id TEXT`.catch(() => {});
+    await sql`ALTER TABLE logs ADD COLUMN IF NOT EXISTS user_id TEXT`.catch(() => {});
+
+    // Backfill apps.user_id from owner_user_id for real Discord users, and purge shared mock usr_admin rows
+    await sql`
+      UPDATE apps
+      SET user_id = REPLACE(owner_user_id, 'usr_', '')
+      WHERE user_id IS NULL AND owner_user_id LIKE 'usr_%' AND owner_user_id != 'usr_admin'
+    `.catch(() => {});
+
+    // Assign any legacy usr_admin bots exclusively to the Founder Discord ID so they are never globally shared
+    await sql`
+      INSERT INTO users (id, email, display_name, discord_id, discord_username, role, created_at, updated_at)
+      VALUES (
+        ${`usr_${DEFAULT_FOUNDER_DISCORD_ID}`},
+        'founder@veloce.app',
+        'Founder',
+        ${DEFAULT_FOUNDER_DISCORD_ID},
+        'founder',
+        'FOUNDER',
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT (id) DO UPDATE SET role = 'FOUNDER'
+    `.catch(() => {});
+
+    await sql`
+      UPDATE apps
+      SET
+        user_id = ${DEFAULT_FOUNDER_DISCORD_ID},
+        owner_user_id = ${`usr_${DEFAULT_FOUNDER_DISCORD_ID}`},
+        creator_user_id = ${`usr_${DEFAULT_FOUNDER_DISCORD_ID}`}
+      WHERE owner_user_id = 'usr_admin' OR user_id IS NULL
+    `.catch(() => {});
+
+    // Dodo Webhooks & Config tables
     await sql`
       CREATE TABLE IF NOT EXISTS dodo_webhook_events (
         webhook_id TEXT PRIMARY KEY,
@@ -117,22 +188,128 @@ async function ensureSchema(sql: any) {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
+
+    // Immutable Staff Audit Logs table
+    await sql`
+      CREATE TABLE IF NOT EXISTS staff_audit_logs (
+        id SERIAL PRIMARY KEY,
+        actor_discord_id TEXT NOT NULL,
+        actor_username TEXT NOT NULL,
+        actor_role TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        details JSONB,
+        ip_address TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
     schemaMigrated = true;
   } catch (err) {
     console.error("ensureSchema error", err);
   }
 }
 
-async function ensureAdminUser(sql: any) {
-  try {
-    await sql`
-      INSERT INTO users (id, email, display_name, discord_id, discord_username, created_at, updated_at)
-      VALUES ('usr_admin', 'developer@veloce.app', 'Discord User', '000000000000000000', 'discord_user', NOW(), NOW())
-      ON CONFLICT (id) DO NOTHING
-    `;
-  } catch (err) {
-    console.error("ensureAdminUser error", err);
+function sanitizeBotForClient(bot: any) {
+  if (!bot) return null;
+  const { discord_token, bot_token, ...safe } = bot;
+  const rawToken = discord_token || bot_token || null;
+  return {
+    ...safe,
+    user_id: safe.user_id || String(safe.owner_user_id || "").replace(/^usr_/, ""),
+    has_token: Boolean(rawToken),
+    token_preview: maskBotToken(rawToken),
+  };
+}
+
+async function writeStaffAuditLog(
+  sql: any,
+  actor: AuthenticatedUser,
+  targetId: string,
+  actionType: string,
+  details: Record<string, any>,
+  ipAddress: string
+) {
+  await sql`
+    INSERT INTO staff_audit_logs (
+      actor_discord_id, actor_username, actor_role, target_id, action_type, details, ip_address, created_at
+    ) VALUES (
+      ${actor.discord_id},
+      ${actor.discord_username || actor.display_name || actor.discord_id},
+      ${actor.role},
+      ${targetId},
+      ${actionType},
+      ${JSON.stringify(details || {})}::jsonb,
+      ${ipAddress},
+      NOW()
+    )
+  `.catch((err: any) => {
+    console.error("Failed to write staff audit log", err);
+  });
+}
+
+/**
+ * Cryptographically verifies the session token from the `veloce_session` HttpOnly cookie
+ * or `Authorization: Bearer <jwt>` header.
+ * NEVER trusts client-sent headers, query params, or unsigned values for `user_id`, `discord_id`, or `role`.
+ */
+async function getVerifiedUser(c: any, sql: any): Promise<AuthenticatedUser | null> {
+  const cookies = parseCookies(c.req.header("cookie"));
+  let rawToken = cookies["veloce_session"] || "";
+
+  const authHeader = c.req.header("authorization") || "";
+  if (!rawToken && authHeader.toLowerCase().startsWith("bearer ")) {
+    rawToken = authHeader.slice(7).trim();
   }
+
+  if (!rawToken) return null;
+
+  const sessionSecret = await resolveSessionSecret(sql, c.env);
+  const verifiedPayload = await verifySessionToken(rawToken, sessionSecret);
+  if (!verifiedPayload || !verifiedPayload.discord_id) {
+    return null;
+  }
+
+  const discordId = String(verifiedPayload.discord_id);
+  const founderId = (c.env.FOUNDER_DISCORD_ID || DEFAULT_FOUNDER_DISCORD_ID).trim();
+  const isFounder = discordId === founderId;
+
+  const rows = await sql`
+    SELECT id, email, display_name, discord_id, discord_username, discord_avatar, role, plan, COALESCE(extra_bot_slots, 0) AS extra_bot_slots, COALESCE(is_banned, false) AS is_banned, created_at
+    FROM users
+    WHERE discord_id = ${discordId} OR id = ${`usr_${discordId}`}
+    LIMIT 1
+  `.catch(() => []);
+
+  if (!rows || rows.length === 0) {
+    return null;
+  }
+
+  const dbUser = rows[0];
+  const effectiveRole: StaffRole = isFounder
+    ? "FOUNDER"
+    : normalizeStaffRole(dbUser.role);
+
+  if (isFounder && dbUser.role !== "FOUNDER") {
+    await sql`
+      UPDATE users SET role = 'FOUNDER', is_banned = false, updated_at = NOW()
+      WHERE id = ${dbUser.id}
+    `.catch(() => {});
+  }
+
+  return {
+    id: dbUser.id,
+    discord_id: String(dbUser.discord_id),
+    discord_username: dbUser.discord_username || "discord_user",
+    discord_avatar: dbUser.discord_avatar || null,
+    display_name: dbUser.display_name || dbUser.discord_username || "Discord User",
+    email: dbUser.email || `${discordId}@discord.user`,
+    role: effectiveRole,
+    plan: (dbUser.plan as "free" | "pro" | "studio") || "free",
+    extra_bot_slots: Math.max(0, Number(dbUser.extra_bot_slots || 0)),
+    is_banned: isFounder ? false : Boolean(dbUser.is_banned),
+    created_at: dbUser.created_at,
+  };
 }
 
 function disconnectBotGatewayImmediate(appId: string) {
@@ -247,7 +424,6 @@ async function syncSlashCommandsWithDiscord(sql: any, botApp: any) {
   `;
 
   if (!commands || commands.length === 0) {
-    await ensureAdminUser(sql);
     const cmdId = "cmd_" + crypto.randomUUID().replace(/-/g, "").substring(0, 16);
     const defaultFlow = {
       nodes: [
@@ -277,13 +453,17 @@ async function syncSlashCommandsWithDiscord(sql: any, botApp: any) {
       ],
     };
 
+    const ownerUserId = botApp.owner_user_id || `usr_${DEFAULT_FOUNDER_DISCORD_ID}`;
+    const userId = botApp.user_id || String(ownerUserId).replace(/^usr_/, "");
+
     commands = await sql`
       INSERT INTO commands (
-        id, app_id, creator_user_id, name, description, flow_source, enabled, created_at, updated_at
+        id, app_id, creator_user_id, user_id, name, description, flow_source, enabled, created_at, updated_at
       ) VALUES (
         ${cmdId},
         ${botApp.id},
-        'usr_admin',
+        ${ownerUserId},
+        ${userId},
         'ping',
         'Replies with pong and bot status',
         ${JSON.stringify(defaultFlow)},
@@ -313,6 +493,20 @@ async function syncSlashCommandsWithDiscord(sql: any, botApp: any) {
         body: JSON.stringify(payload),
       }
     );
+
+    if (res.status === 429) {
+      await sql`
+        INSERT INTO logs (app_id, user_id, message, level, details, created_at)
+        VALUES (
+          ${botApp.id},
+          ${botApp.user_id || null},
+          'Discord API 429 Rate Limit encountered during slash command sync',
+          'error',
+          ${JSON.stringify({ status: 429, endpoint: "commands.sync" })}::jsonb,
+          NOW()
+        )
+      `.catch(() => {});
+    }
 
     return { synced: res.ok, count: commands.length };
   } catch (err) {
@@ -560,18 +754,31 @@ async function syncAllBotsGateway(sql: any, durationMs = 25000) {
   }
 }
 
+// Helper: Verify that the authenticated user owns the target bot (prevents IDOR)
+async function getOwnedBotOrNull(sql: any, appId: string, user: AuthenticatedUser) {
+  const rows = await sql`
+    SELECT id, user_id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, discord_token, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
+    FROM apps
+    WHERE id = ${appId}
+      AND (user_id = ${user.discord_id} OR owner_user_id = ${user.id})
+    LIMIT 1
+  `;
+  return rows && rows.length > 0 ? rows[0] : null;
+}
+
 // Root and Health
 app.get("/", (c) =>
   c.json({
     service: "veloce-api",
     runtime: "cloudflare-workers",
     status: "ok",
-    version: "0.2.1",
+    version: "0.3.0",
     timestamp: new Date().toISOString(),
   })
 );
 
 app.get("/v1/health", (c) => c.json({ status: "ok", timestamp: new Date().toISOString() }));
+app.get("/api/health", (c) => c.json({ status: "ok", timestamp: new Date().toISOString() }));
 
 app.get("/v1/stats", async (c) => {
   try {
@@ -597,176 +804,255 @@ app.get("/v1/stats", async (c) => {
   }
 });
 
-// Current user profile (session-aware)
-app.get("/v1/user/@me", async (c) => {
-  const cookies = parseCookies(c.req.header("cookie"));
-  const sessionUserId = cookies["veloce_session"];
+// ============================================================================
+// Task 1: Cryptographically Signed Discord OAuth2 & Zero-Trust Session Auth
+// ============================================================================
 
-  if (!sessionUserId) {
+async function handleGetCurrentUser(c: any) {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) {
     return c.json({ error: "Unauthorized" }, 401);
   }
-
-  try {
-    const sql = neon(c.env.DATABASE_URL);
-    const rows = await sql`
-      SELECT id, email, display_name, discord_id, discord_username, discord_avatar, created_at
-      FROM users
-      WHERE id = ${sessionUserId}
-      LIMIT 1
-    `;
-    if (rows && rows.length > 0) {
-      return c.json(rows[0]);
-    }
-  } catch (err) {
-    console.error("Failed to fetch session user from DB", err);
+  if (authUser.is_banned) {
+    return c.json({ error: "Your account has been suspended for Terms of Service violations." }, 403);
   }
+  return c.json(authUser);
+}
 
-  return c.json({
-    id: sessionUserId,
-    email: "developer@veloce.app",
-    display_name: "Discord User",
-    discord_id: "000000000000000000",
-    discord_username: "discord_user",
-    created_at: new Date().toISOString(),
-  });
-});
+app.get("/api/auth/me", handleGetCurrentUser);
+app.get("/v1/user/@me", handleGetCurrentUser);
 
-// Real Discord OAuth2 Login
-app.get("/v1/auth/login", async (c) => {
-  const redirect = c.req.query("redirect") || "/apps";
+async function handleDiscordOAuthStart(c: any) {
+  const rawRedirect = c.req.query("redirect") || "/apps";
+  const safeRedirect = rawRedirect.startsWith("/") ? rawRedirect : "/apps";
   const origin = getPublicOrigin(c);
-  const callbackUrl = `${origin}/v1/auth/login/callback`;
+  const callbackUrl = `${origin}/api/auth/discord/callback`;
 
-  let clientId = c.env.DISCORD_CLIENT_ID || "";
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
 
-  if (!clientId) {
-    try {
-      const apps = await sql`
-        SELECT discord_id FROM apps
-        WHERE discord_id IS NOT NULL AND discord_id != '000000000000000000'
-        ORDER BY created_at DESC LIMIT 1
-      `;
-      if (apps && apps.length > 0) {
-        clientId = apps[0].discord_id;
-      }
-    } catch {}
-  }
-
-  await ensureAdminUser(sql);
-
-  if (clientId && c.env.DISCORD_CLIENT_SECRET) {
-    const discordAuthUrl = new URL("https://discord.com/oauth2/authorize");
-    discordAuthUrl.searchParams.set("client_id", clientId);
-    discordAuthUrl.searchParams.set("redirect_uri", callbackUrl);
-    discordAuthUrl.searchParams.set("response_type", "code");
-    discordAuthUrl.searchParams.set("scope", "identify email");
-    discordAuthUrl.searchParams.set("state", redirect);
-    discordAuthUrl.searchParams.set("prompt", "none");
-    return c.redirect(discordAuthUrl.toString(), 302);
-  }
-
-  const safeRedirect = redirect.startsWith("/") ? redirect : "/apps";
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: safeRedirect,
-      "Set-Cookie": `veloce_session=usr_admin; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
-    },
+  const { clientId, clientSecret } = await resolveDiscordOAuthCredentials(sql, c.env, {
+    clientId: c.req.header("x-cloudflare-pages-oauth-id"),
+    clientSecret: c.req.header("x-cloudflare-pages-oauth-secret"),
   });
-});
-
-// Discord OAuth2 Callback
-app.get("/v1/auth/login/callback", async (c) => {
-  const code = c.req.query("code");
-  const stateRedirect = c.req.query("state") || "/apps";
-  const safeRedirect = stateRedirect.startsWith("/") ? stateRedirect : "/apps";
-
-  const sql = neon(c.env.DATABASE_URL);
-  await ensureAdminUser(sql);
-
-  if (code && c.env.DISCORD_CLIENT_ID && c.env.DISCORD_CLIENT_SECRET) {
-    try {
-      const origin = getPublicOrigin(c);
-      const callbackUrl = `${origin}/v1/auth/login/callback`;
-
-      const tokenRes = await fetch("https://discord.com/api/v10/oauth2/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          client_id: c.env.DISCORD_CLIENT_ID,
-          client_secret: c.env.DISCORD_CLIENT_SECRET,
-          grant_type: "authorization_code",
-          code,
-          redirect_uri: callbackUrl,
-        }),
-      });
-
-      if (tokenRes.ok) {
-        const tokenData: any = await tokenRes.json();
-        const userRes = await fetch("https://discord.com/api/v10/users/@me", {
-          headers: { Authorization: `Bearer ${tokenData.access_token}` },
-        });
-
-        if (userRes.ok) {
-          const discordUser: any = await userRes.json();
-          const userId = `usr_${discordUser.id}`;
-          const displayName = discordUser.global_name || discordUser.username || "Discord User";
-
-          await sql`
-            INSERT INTO users (id, email, display_name, discord_id, discord_username, discord_avatar, created_at, updated_at)
-            VALUES (
-              ${userId},
-              ${discordUser.email || `${discordUser.id}@discord.user`},
-              ${displayName},
-              ${discordUser.id},
-              ${discordUser.username},
-              ${discordUser.avatar || null},
-              NOW(),
-              NOW()
-            )
-            ON CONFLICT (id) DO UPDATE SET
-              display_name = EXCLUDED.display_name,
-              discord_username = EXCLUDED.discord_username,
-              discord_avatar = EXCLUDED.discord_avatar,
-              updated_at = NOW()
-          `;
-
-          return new Response(null, {
-            status: 302,
-            headers: {
-              Location: safeRedirect,
-              "Set-Cookie": `veloce_session=${encodeURIComponent(userId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
-            },
-          });
-        }
-      }
-    } catch (err) {
-      console.error("OAuth callback error", err);
-    }
+  if (!clientId || !clientSecret) {
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Discord OAuth2 Configuration Required — Veloce</title>
+  <style>
+    body { background: #0b0d13; color: #f3f4f6; font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1.5rem; }
+    .card { max-width: 540px; width: 100%; background: #12151f; border: 1px solid #262b3d; border-radius: 16px; padding: 2rem; box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+    h1 { font-size: 1.25rem; margin: 0 0 0.75rem; color: #fff; }
+    p { font-size: 0.875rem; line-height: 1.6; color: #9ca3af; margin: 0 0 1rem; }
+    code { background: #1c2030; color: #818cf8; padding: 0.2rem 0.45rem; border-radius: 6px; font-size: 0.8rem; word-break: break-all; }
+    .box { background: #0b0d13; border: 1px solid #262b3d; border-radius: 10px; padding: 0.875rem; margin-bottom: 1rem; font-size: 0.8rem; color: #d1d5db; }
+    a.btn { display: inline-block; background: #5865F2; color: #fff; text-decoration: none; padding: 0.65rem 1.25rem; border-radius: 10px; font-weight: 600; font-size: 0.875rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Discord OAuth2 Credentials Required</h1>
+    <p>To enable zero-trust Discord login, configure your Discord OAuth2 application secrets in Cloudflare:</p>
+    <div class="box">
+      1. Set <code>DISCORD_CLIENT_ID</code>, <code>DISCORD_CLIENT_SECRET</code>, and <code>SESSION_SECRET</code> in your Cloudflare environment variables.<br/><br/>
+      2. In the Discord Developer Portal &rarr; OAuth2 &rarr; Redirects, add:<br/>
+      <code>${callbackUrl}</code>
+    </div>
+    <a class="btn" href="/">Back to Home</a>
+  </div>
+</body>
+</html>`;
+    return new Response(html, {
+      status: 503,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
   }
+
+  const sessionSecret = await resolveSessionSecret(sql, c.env);
+  const { state } = await createSignedOAuthState(safeRedirect, sessionSecret);
+
+  const discordAuthUrl = new URL("https://discord.com/oauth2/authorize");
+  discordAuthUrl.searchParams.set("client_id", clientId);
+  discordAuthUrl.searchParams.set("redirect_uri", callbackUrl);
+  discordAuthUrl.searchParams.set("response_type", "code");
+  discordAuthUrl.searchParams.set("scope", "identify email");
+  discordAuthUrl.searchParams.set("state", state);
+  discordAuthUrl.searchParams.set("prompt", "consent");
+
+  const isSecure = origin.startsWith("https://");
+  const cookieAttrs = `Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=600`;
 
   return new Response(null, {
     status: 302,
     headers: {
-      Location: safeRedirect,
-      "Set-Cookie": `veloce_session=usr_admin; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
+      Location: discordAuthUrl.toString(),
+      "Set-Cookie": `veloce_oauth_state=${encodeURIComponent(state)}; ${cookieAttrs}`,
     },
   });
-});
+}
 
-// Logout clears session cookie
-app.post("/v1/auth/logout", (c) => {
+app.get("/api/auth/discord", handleDiscordOAuthStart);
+app.get("/v1/auth/login", handleDiscordOAuthStart);
+
+async function handleDiscordOAuthCallback(c: any) {
+  const code = c.req.query("code") || "";
+  const stateParam = c.req.query("state") || "";
+  const origin = getPublicOrigin(c);
+  const callbackUrl = `${origin}/api/auth/discord/callback`;
+
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const sessionSecret = await resolveSessionSecret(sql, c.env);
+  const cookies = parseCookies(c.req.header("cookie"));
+  const cookieState = cookies["veloce_oauth_state"];
+
+  const verifiedState = await verifySignedOAuthState(stateParam, cookieState, sessionSecret);
+  if (!verifiedState || !code) {
+    return c.json(
+      { error: "Invalid or expired OAuth2 CSRF state nonce. Please try logging in again." },
+      400
+    );
+  }
+
+  const { clientId, clientSecret } = await resolveDiscordOAuthCredentials(sql, c.env, {
+    clientId: c.req.header("x-cloudflare-pages-oauth-id"),
+    clientSecret: c.req.header("x-cloudflare-pages-oauth-secret"),
+  });
+  if (!clientId || !clientSecret) {
+    return c.json({ error: "Discord OAuth2 credentials are not configured" }, 503);
+  }
+
+  const tokenRes = await fetch("https://discord.com/api/v10/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: callbackUrl,
+    }),
+  });
+
+  if (!tokenRes.ok) {
+    return c.json({ error: "Failed to exchange Discord OAuth2 authorization code" }, 401);
+  }
+
+  const tokenData: any = await tokenRes.json();
+  const userRes = await fetch("https://discord.com/api/v10/users/@me", {
+    headers: { Authorization: `Bearer ${tokenData.access_token}` },
+  });
+
+  if (!userRes.ok) {
+    return c.json({ error: "Failed to fetch verified Discord profile" }, 401);
+  }
+
+  const discordUser: any = await userRes.json();
+  const discordId = String(discordUser.id || "").trim();
+  if (!/^\d{17,20}$/.test(discordId)) {
+    return c.json({ error: "Invalid Discord user ID returned from OAuth provider" }, 400);
+  }
+
+  const founderId = (c.env.FOUNDER_DISCORD_ID || DEFAULT_FOUNDER_DISCORD_ID).trim();
+  const isFounder = discordId === founderId;
+  const userId = `usr_${discordId}`;
+  const displayName = discordUser.global_name || discordUser.username || "Discord User";
+  const email = discordUser.email || `${discordId}@discord.user`;
+
+  // Check if user already exists (e.g., pre-authorized staff or existing account)
+  const existingRows = await sql`
+    SELECT id, role, COALESCE(is_banned, false) AS is_banned
+    FROM users
+    WHERE discord_id = ${discordId} OR id = ${userId}
+    LIMIT 1
+  `.catch(() => []);
+
+  if (existingRows?.[0]?.is_banned && !isFounder) {
+    return c.json(
+      { error: "Your account has been suspended for Terms of Service violations." },
+      403
+    );
+  }
+
+  const initialRole: StaffRole = isFounder
+    ? "FOUNDER"
+    : normalizeStaffRole(existingRows?.[0]?.role || "USER");
+
+  await sql`
+    INSERT INTO users (
+      id, email, display_name, discord_id, discord_username, discord_avatar, role, created_at, updated_at
+    ) VALUES (
+      ${userId},
+      ${email},
+      ${displayName},
+      ${discordId},
+      ${discordUser.username || displayName},
+      ${discordUser.avatar || null},
+      ${initialRole},
+      NOW(),
+      NOW()
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      email = EXCLUDED.email,
+      display_name = EXCLUDED.display_name,
+      discord_id = EXCLUDED.discord_id,
+      discord_username = EXCLUDED.discord_username,
+      discord_avatar = EXCLUDED.discord_avatar,
+      role = CASE
+        WHEN EXCLUDED.discord_id = ${founderId} THEN 'FOUNDER'
+        ELSE users.role
+      END,
+      updated_at = NOW()
+  `;
+
+  // Issue cryptographically signed HMAC-SHA256 Session JWT
+  const signedJwt = await signSessionToken(discordId, sessionSecret);
+  const isSecure = origin.startsWith("https://");
+  const sessionCookie = `veloce_session=${encodeURIComponent(signedJwt)}; Path=/; HttpOnly; ${
+    isSecure ? "Secure; " : ""
+  }SameSite=Lax; Max-Age=604800`;
+  const clearStateCookie = `veloce_oauth_state=; Path=/; HttpOnly; ${
+    isSecure ? "Secure; " : ""
+  }SameSite=Lax; Max-Age=0`;
+
+  const headers = new Headers();
+  headers.set("Location", verifiedState.redirect);
+  headers.append("Set-Cookie", sessionCookie);
+  headers.append("Set-Cookie", clearStateCookie);
+
+  return new Response(null, {
+    status: 302,
+    headers,
+  });
+}
+
+app.get("/api/auth/discord/callback", handleDiscordOAuthCallback);
+app.get("/v1/auth/login/callback", handleDiscordOAuthCallback);
+
+function handleLogout(c: any) {
+  const origin = getPublicOrigin(c);
+  const isSecure = origin.startsWith("https://");
   return new Response(JSON.stringify({ status: "logged_out", success: true }), {
     status: 200,
     headers: {
       "Content-Type": "application/json",
-      "Set-Cookie": "veloce_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+      "Set-Cookie": `veloce_session=; Path=/; HttpOnly; ${
+        isSecure ? "Secure; " : ""
+      }SameSite=Lax; Max-Age=0`,
     },
   });
-});
+}
 
-// Discord Interactions Webhook Endpoint
+app.post("/api/auth/logout", handleLogout);
+app.post("/v1/auth/logout", handleLogout);
+
+// Discord Interactions Webhook Endpoint (verified via Ed25519 signature)
 async function handleDiscordInteraction(c: any) {
   const appId = c.req.param("app_id");
   const signature = c.req.header("x-signature-ed25519") || "";
@@ -777,7 +1063,7 @@ async function handleDiscordInteraction(c: any) {
   await ensureSchema(sql);
 
   const apps = await sql`
-    SELECT id, name, discord_id, discord_public_key, discord_token, enabled, plan, custom_branding
+    SELECT id, user_id, owner_user_id, name, discord_id, discord_public_key, discord_token, enabled, plan, custom_branding
     FROM apps 
     WHERE (id = ${appId} OR discord_id = ${appId}) AND enabled = true
     LIMIT 1
@@ -822,13 +1108,22 @@ async function handleDiscordInteraction(c: any) {
 app.post("/v1/interactions/:app_id", handleDiscordInteraction);
 app.post("/interactions/:app_id", handleDiscordInteraction);
 
-// Apps Management
-app.get("/v1/apps", async (c) => {
+// ============================================================================
+// Task 2 & Task 3: Strict Per-User Bot Isolation, Token Masking & 402 Upsell
+// ============================================================================
+
+async function handleListUserBots(c: any) {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
+
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  if (authUser.is_banned) return c.json({ error: "Account suspended" }, 403);
+
   const rows = await sql`
-    SELECT id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, discord_token, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
+    SELECT id, user_id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, discord_token, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
     FROM apps
+    WHERE user_id = ${authUser.discord_id} OR owner_user_id = ${authUser.id}
     ORDER BY created_at DESC
   `;
 
@@ -843,27 +1138,40 @@ app.get("/v1/apps", async (c) => {
     )
   );
 
-  const sanitized = rows.map(({ discord_token, ...rest }: any) => rest);
+  // Never expose raw bot_token/discord_token in list responses
+  const sanitized = rows.map((bot: any) => sanitizeBotForClient(bot));
   return c.json(sanitized);
-});
+}
 
-app.get("/v1/apps/:id", async (c) => {
+app.get("/api/bots", handleListUserBots);
+app.get("/v1/apps", handleListUserBots);
+
+async function handleGetUserBot(c: any) {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
+
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  if (authUser.is_banned) return c.json({ error: "Account suspended" }, 403);
+
   const id = c.req.param("id");
-  const rows = await sql`
-    SELECT id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
-    FROM apps
-    WHERE id = ${id}
-    LIMIT 1
-  `;
-  if (!rows || rows.length === 0) return c.json({ error: "App not found" }, 404);
-  return c.json(rows[0]);
-});
+  const bot = await getOwnedBotOrNull(sql, id, authUser);
+  if (!bot) return c.json({ error: "Bot not found" }, 404);
 
-app.post("/v1/apps", async (c) => {
+  return c.json(sanitizeBotForClient(bot));
+}
+
+app.get("/api/bots/:id", handleGetUserBot);
+app.get("/v1/apps/:id", handleGetUserBot);
+
+async function handleCreateUserBot(c: any) {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
+
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  if (authUser.is_banned) return c.json({ error: "Account suspended" }, 403);
+
   const body = await c.req.json();
   const token = body.token?.trim();
   const customName = body.name?.trim();
@@ -873,41 +1181,28 @@ app.post("/v1/apps", async (c) => {
     return c.json({ error: "Bot token is required" }, 400);
   }
 
-  await ensureAdminUser(sql);
-
-  const cookies = parseCookies(c.req.header("cookie"));
-  const ownerUserId = cookies["veloce_session"] || "usr_admin";
-
-  // Load user's account plan + extra_bot_slots and existing bots to enforce Fair Use / Plan quotas
-  const userRows = await sql`
-    SELECT id, plan, COALESCE(extra_bot_slots, 0) AS extra_bot_slots
-    FROM users
-    WHERE id = ${ownerUserId}
-    LIMIT 1
-  `.catch(() => []);
-  const userRecord = userRows?.[0] || { plan: "free", extra_bot_slots: 0 };
-  const extraBotSlots = Math.max(0, Number(userRecord.extra_bot_slots || 0));
-
   const existingApps = await sql`
     SELECT id, plan, enabled
     FROM apps
-    WHERE owner_user_id = ${ownerUserId} OR owner_user_id = 'usr_admin'
+    WHERE user_id = ${authUser.discord_id} OR owner_user_id = ${authUser.id}
   `;
 
+  const extraBotSlots = Math.max(0, Number(authUser.extra_bot_slots || 0));
   const hasStudioTier =
-    userRecord.plan === "studio" ||
+    authUser.plan === "studio" ||
     existingApps.some((a: any) => a.plan === "studio");
   const hasProTier =
     !hasStudioTier &&
-    (userRecord.plan === "pro" || existingApps.some((a: any) => a.plan === "pro"));
+    (authUser.plan === "pro" || existingApps.some((a: any) => a.plan === "pro"));
 
-  const activeBotCount = existingApps.filter((a: any) => a.enabled !== false).length;
+  const currentBotCount = existingApps.length;
 
+  // Task 3: Self-Serve Extension Pack Upsell (402 Payment Required when hitting 30 + extra_bot_slots)
   if (hasStudioTier) {
     const studioMaxBots = STUDIO_BOT_SOFT_LIMIT + extraBotSlots;
-    if (activeBotCount >= studioMaxBots) {
+    if (currentBotCount >= studioMaxBots) {
       const msg =
-        "You've reached the Studio Fair Use allocation (30 active bots). Purchase an expansion pack or contact support to add more bot slots.";
+        "You have reached your Studio allocation of 30 active bots. Add the +10 Extra Bot Slots Expansion Pack ($4.99/month) to connect more bots instantly.";
       return c.json(
         {
           code: "FAIR_USE_LIMIT_REACHED",
@@ -915,14 +1210,21 @@ app.post("/v1/apps", async (c) => {
           error: msg,
           limit: studioMaxBots,
           extra_bot_slots: extraBotSlots,
+          upsell: {
+            plan: "extra_slots_10",
+            name: "+10 Extra Bot Slots",
+            price_display: "$4.99/month",
+            price_cents: 499,
+            slots: 10,
+          },
         },
-        403
+        402
       );
     }
   } else if (hasProTier) {
     const proMaxBots = PRO_LIMIT + extraBotSlots;
-    if (activeBotCount >= proMaxBots) {
-      const msg = `You've reached the Pro plan allocation (${PRO_LIMIT} active bots). Upgrade to Studio or purchase additional bot slots to connect more bots.`;
+    if (currentBotCount >= proMaxBots) {
+      const msg = `You have reached the Pro plan limit (${proMaxBots} bots). Upgrade to Studio ($14.99/mo) or add +10 Extra Bot Slots ($4.99/mo) to connect more bots.`;
       return c.json(
         {
           code: "PLAN_LIMIT_REACHED",
@@ -931,13 +1233,13 @@ app.post("/v1/apps", async (c) => {
           limit: proMaxBots,
           extra_bot_slots: extraBotSlots,
         },
-        403
+        402
       );
     }
   } else {
     const starterMaxBots = STARTER_LIMIT + extraBotSlots;
-    if (activeBotCount >= starterMaxBots) {
-      const msg = `You've reached the Free Starter plan allocation (${STARTER_LIMIT} active bots). Upgrade to Pro ($5.99/mo) or Studio ($14.99/mo) to connect more bots.`;
+    if (currentBotCount >= starterMaxBots) {
+      const msg = `You have reached the Free Starter limit (${starterMaxBots} bots). Upgrade to Pro ($5.99/mo) or Studio ($14.99/mo) to connect more bots.`;
       return c.json(
         {
           code: "PLAN_LIMIT_REACHED",
@@ -946,7 +1248,7 @@ app.post("/v1/apps", async (c) => {
           limit: starterMaxBots,
           extra_bot_slots: extraBotSlots,
         },
-        403
+        402
       );
     }
   }
@@ -964,6 +1266,11 @@ app.post("/v1/apps", async (c) => {
       discordId = data.id;
       if (!customName) botUsername = data.username;
       botAvatar = data.avatar || null;
+    } else {
+      return c.json(
+        { error: "Invalid Discord Bot Token. Please verify the token in the Discord Developer Portal." },
+        400
+      );
     }
   } catch (err) {
     console.error("Failed to fetch Discord bot user", err);
@@ -975,11 +1282,12 @@ app.post("/v1/apps", async (c) => {
 
   const rows = await sql`
     INSERT INTO apps (
-      id, owner_user_id, creator_user_id, name, discord_id, discord_token, discord_public_key, discord_avatar, enabled, plan, custom_branding, created_at, updated_at
+      id, user_id, owner_user_id, creator_user_id, name, discord_id, discord_token, discord_public_key, discord_avatar, enabled, plan, custom_branding, created_at, updated_at
     ) VALUES (
       ${appId},
-      ${ownerUserId},
-      ${ownerUserId},
+      ${authUser.discord_id},
+      ${authUser.id},
+      ${authUser.id},
       ${botUsername},
       ${discordId},
       ${token},
@@ -991,10 +1299,10 @@ app.post("/v1/apps", async (c) => {
       NOW(),
       NOW()
     )
-    RETURNING id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
+    RETURNING id, user_id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, discord_token, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
   `;
 
-  const createdApp = { ...rows[0], discord_token: token };
+  const createdApp = rows[0];
   c.executionCtx.waitUntil(
     (async () => {
       await syncSlashCommandsWithDiscord(sql, createdApp);
@@ -1002,35 +1310,38 @@ app.post("/v1/apps", async (c) => {
     })()
   );
 
-  return c.json(rows[0], 201);
-});
+  return c.json(sanitizeBotForClient(createdApp), 201);
+}
 
-app.patch("/v1/apps/:id", async (c) => {
+app.post("/api/bots", handleCreateUserBot);
+app.post("/v1/apps", handleCreateUserBot);
+
+async function handleUpdateUserBot(c: any) {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
+
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  if (authUser.is_banned) return c.json({ error: "Account suspended" }, 403);
+
   const id = c.req.param("id");
   const body = await c.req.json();
 
-  const existing = await sql`
-    SELECT id, discord_id, discord_token, plan, custom_branding, subscription_status
-    FROM apps
-    WHERE id = ${id}
-    LIMIT 1
-  `;
-  if (!existing || existing.length === 0) return c.json({ error: "App not found" }, 404);
+  // Strict IDOR protection: WHERE id = ? AND user_id = verifiedSession.discord_id
+  const existing = await getOwnedBotOrNull(sql, id, authUser);
+  if (!existing) return c.json({ error: "Bot not found" }, 404);
 
-  // Paid plan upgrades are granted strictly via verified Dodo Payments webhooks (never directly from client PATCH)
-  const currentPlan = existing[0].plan || "free";
-  const nextPlan = body.plan === "free" ? "free" : currentPlan;
-  const canUseCustomBranding = nextPlan === "pro" || nextPlan === "studio";
+  // Anti-Privilege-Escalation Guard: Never allow client PATCH to upgrade plan, role, or extra_bot_slots
+  const currentPlan = existing.plan || "free";
+  const canUseCustomBranding = currentPlan === "pro" || currentPlan === "studio";
   const nextCustomBranding = canUseCustomBranding
-    ? body.custom_branding ?? existing[0].custom_branding ?? false
+    ? body.custom_branding ?? existing.custom_branding ?? false
     : false;
 
   if (body.enabled === false) {
     disconnectBotGatewayImmediate(id);
     c.executionCtx.waitUntil(
-      forceDiscordBotOfflineAndClearCommands(undefined, existing[0].discord_token)
+      forceDiscordBotOfflineAndClearCommands(undefined, existing.discord_token)
     );
   }
 
@@ -1042,52 +1353,63 @@ app.patch("/v1/apps/:id", async (c) => {
       enabled = COALESCE(${body.enabled ?? null}, enabled),
       discord_public_key = CASE WHEN ${body.public_key !== undefined} THEN ${body.public_key || null} ELSE discord_public_key END,
       discord_token = CASE WHEN ${body.token !== undefined && !!body.token} THEN ${body.token} ELSE discord_token END,
-      plan = ${nextPlan},
       custom_branding = ${nextCustomBranding},
       discord_status = CASE WHEN ${body.discord_status !== undefined} THEN ${JSON.stringify(body.discord_status)}::jsonb ELSE discord_status END,
       updated_at = NOW()
-    WHERE id = ${id}
-    RETURNING id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
+    WHERE id = ${id} AND (user_id = ${authUser.discord_id} OR owner_user_id = ${authUser.id})
+    RETURNING id, user_id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, discord_token, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
   `;
 
-  return c.json(rows[0]);
-});
+  if (!rows || rows.length === 0) return c.json({ error: "Bot not found" }, 404);
+  return c.json(sanitizeBotForClient(rows[0]));
+}
 
-app.delete("/v1/apps/:id", async (c) => {
+app.patch("/api/bots/:id", handleUpdateUserBot);
+app.patch("/v1/apps/:id", handleUpdateUserBot);
+
+async function handleDeleteUserBot(c: any) {
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  if (authUser.is_banned) return c.json({ error: "Account suspended" }, 403);
+
   const id = c.req.param("id");
+  const existing = await getOwnedBotOrNull(sql, id, authUser);
+  if (!existing) return c.json({ error: "Bot not found" }, 404);
 
-  const existing = await sql`
-    SELECT id, discord_id, discord_token
-    FROM apps
-    WHERE id = ${id}
-    LIMIT 1
-  `;
-
-  // Disconnect active gateway socket immediately
   disconnectBotGatewayImmediate(id);
 
-  // Remove child records & app record from DB
   await sql`DELETE FROM commands WHERE app_id = ${id}`;
   await sql`DELETE FROM event_listeners WHERE app_id = ${id}`.catch(() => {});
   await sql`DELETE FROM logs WHERE app_id = ${id}`.catch(() => {});
-  await sql`DELETE FROM apps WHERE id = ${id}`;
+  await sql`
+    DELETE FROM apps
+    WHERE id = ${id} AND (user_id = ${authUser.discord_id} OR owner_user_id = ${authUser.id})
+  `;
 
-  // Clear Discord global slash commands and set bot presence to invisible/offline
-  if (existing && existing.length > 0) {
-    const bot = existing[0];
-    c.executionCtx.waitUntil(
-      forceDiscordBotOfflineAndClearCommands(bot.discord_id, bot.discord_token)
-    );
-  }
+  c.executionCtx.waitUntil(
+    forceDiscordBotOfflineAndClearCommands(existing.discord_id, existing.discord_token)
+  );
 
   return c.json({ success: true });
-});
+}
 
-// Commands Management
+app.delete("/api/bots/:id", handleDeleteUserBot);
+app.delete("/v1/apps/:id", handleDeleteUserBot);
+
+// Commands Management (Strictly Scoped to Bot Owner)
 app.get("/v1/apps/:app_id/commands", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
   const appId = c.req.param("app_id");
+  const ownedBot = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!ownedBot) return c.json({ error: "Bot not found" }, 404);
+
   const rows = await sql`
     SELECT id, app_id, creator_user_id, name, description, enabled, flow_source, created_at, updated_at
     FROM commands
@@ -1099,19 +1421,25 @@ app.get("/v1/apps/:app_id/commands", async (c) => {
 
 app.post("/v1/apps/:app_id/commands", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
   const appId = c.req.param("app_id");
+  const ownedBot = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!ownedBot) return c.json({ error: "Bot not found" }, 404);
+
   const body = await c.req.json();
   const cmdId = "cmd_" + crypto.randomUUID().replace(/-/g, "").substring(0, 16);
 
-  await ensureAdminUser(sql);
-
   const rows = await sql`
     INSERT INTO commands (
-      id, app_id, creator_user_id, name, description, flow_source, enabled, created_at, updated_at
+      id, app_id, creator_user_id, user_id, name, description, flow_source, enabled, created_at, updated_at
     ) VALUES (
       ${cmdId},
       ${appId},
-      'usr_admin',
+      ${authUser.id},
+      ${authUser.discord_id},
       ${body.name},
       ${body.description || ""},
       ${JSON.stringify(body.flow_source || { nodes: [], edges: [] })},
@@ -1122,21 +1450,21 @@ app.post("/v1/apps/:app_id/commands", async (c) => {
     RETURNING id, app_id, creator_user_id, name, description, enabled, flow_source, created_at, updated_at
   `;
 
-  c.executionCtx.waitUntil(
-    (async () => {
-      const apps = await sql`SELECT id, discord_id, discord_token FROM apps WHERE id = ${appId} LIMIT 1`;
-      if (apps && apps.length > 0) {
-        await syncSlashCommandsWithDiscord(sql, apps[0]);
-      }
-    })()
-  );
+  c.executionCtx.waitUntil(syncSlashCommandsWithDiscord(sql, ownedBot));
 
   return c.json(rows[0], 201);
 });
 
 app.patch("/v1/apps/:app_id/commands/:id", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
   const appId = c.req.param("app_id");
+  const ownedBot = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!ownedBot) return c.json({ error: "Bot not found" }, 404);
+
   const id = c.req.param("id");
   const body = await c.req.json();
 
@@ -1154,21 +1482,21 @@ app.patch("/v1/apps/:app_id/commands/:id", async (c) => {
 
   if (!rows || rows.length === 0) return c.json({ error: "Command not found" }, 404);
 
-  c.executionCtx.waitUntil(
-    (async () => {
-      const apps = await sql`SELECT id, discord_id, discord_token FROM apps WHERE id = ${appId} LIMIT 1`;
-      if (apps && apps.length > 0) {
-        await syncSlashCommandsWithDiscord(sql, apps[0]);
-      }
-    })()
-  );
+  c.executionCtx.waitUntil(syncSlashCommandsWithDiscord(sql, ownedBot));
 
   return c.json(rows[0]);
 });
 
 app.delete("/v1/apps/:app_id/commands/:id", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
   const appId = c.req.param("app_id");
+  const ownedBot = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!ownedBot) return c.json({ error: "Bot not found" }, 404);
+
   const id = c.req.param("id");
   await sql`DELETE FROM commands WHERE id = ${id} AND app_id = ${appId}`;
   return c.json({ success: true });
@@ -1177,18 +1505,14 @@ app.delete("/v1/apps/:app_id/commands/:id", async (c) => {
 app.post("/v1/apps/:app_id/commands/deploy", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
-  const appId = c.req.param("app_id");
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
 
-  const apps = await sql`
-    SELECT id, name, discord_id, discord_token, enabled, plan, custom_branding, discord_status
-    FROM apps
-    WHERE id = ${appId}
-    LIMIT 1
-  `;
-  if (!apps || apps.length === 0) {
+  const appId = c.req.param("app_id");
+  const botApp = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!botApp) {
     return c.json({ error: "Application not found" }, 404);
   }
-  const botApp = apps[0];
 
   const result = await syncSlashCommandsWithDiscord(sql, botApp);
   c.executionCtx.waitUntil(maintainBotGateway(botApp, sql, 25000));
@@ -1201,10 +1525,17 @@ app.post("/v1/apps/:app_id/commands/deploy", async (c) => {
   });
 });
 
-// Event Listeners Management
+// Event Listeners Management (Strictly Scoped to Bot Owner)
 app.get("/v1/apps/:app_id/events", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
   const appId = c.req.param("app_id");
+  const ownedBot = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!ownedBot) return c.json({ error: "Bot not found" }, 404);
+
   try {
     const rows = await sql`
       SELECT id, app_id, creator_user_id, source, type, description, enabled, filter, flow_source, created_at, updated_at
@@ -1220,19 +1551,25 @@ app.get("/v1/apps/:app_id/events", async (c) => {
 
 app.post("/v1/apps/:app_id/events", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
   const appId = c.req.param("app_id");
+  const ownedBot = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!ownedBot) return c.json({ error: "Bot not found" }, 404);
+
   const body = await c.req.json();
   const evId = "ev_" + crypto.randomUUID().replace(/-/g, "").substring(0, 16);
 
-  await ensureAdminUser(sql);
-
   const rows = await sql`
     INSERT INTO event_listeners (
-      id, app_id, creator_user_id, source, type, description, enabled, filter, flow_source, created_at, updated_at
+      id, app_id, creator_user_id, user_id, source, type, description, enabled, filter, flow_source, created_at, updated_at
     ) VALUES (
       ${evId},
       ${appId},
-      'usr_admin',
+      ${authUser.id},
+      ${authUser.discord_id},
       'discord',
       ${body.type || "message_create"},
       ${body.description || ""},
@@ -1250,7 +1587,14 @@ app.post("/v1/apps/:app_id/events", async (c) => {
 
 app.patch("/v1/apps/:app_id/events/:id", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
   const appId = c.req.param("app_id");
+  const ownedBot = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!ownedBot) return c.json({ error: "Bot not found" }, 404);
+
   const id = c.req.param("id");
   const body = await c.req.json();
 
@@ -1272,17 +1616,31 @@ app.patch("/v1/apps/:app_id/events/:id", async (c) => {
 
 app.delete("/v1/apps/:app_id/events/:id", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
   const appId = c.req.param("app_id");
+  const ownedBot = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!ownedBot) return c.json({ error: "Bot not found" }, 404);
+
   const id = c.req.param("id");
   await sql`DELETE FROM event_listeners WHERE id = ${id} AND app_id = ${appId}`;
   return c.json({ success: true });
 });
 
-// Logs, Guilds & Gateway Telemetry
+// Logs, Guilds & Gateway Telemetry (Strictly Scoped to Bot Owner)
 app.get("/v1/apps/:app_id/logs", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
   const appId = c.req.param("app_id");
-  const limit = parseInt(c.req.query("limit") || "50", 10);
+  const ownedBot = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!ownedBot) return c.json({ error: "Bot not found" }, 404);
+
+  const limit = Math.min(200, Math.max(1, parseInt(c.req.query("limit") || "50", 10)));
   const rows = await sql`
     SELECT id, app_id, message, level, details, created_at
     FROM logs
@@ -1295,12 +1653,18 @@ app.get("/v1/apps/:app_id/logs", async (c) => {
 
 app.get("/v1/apps/:app_id/guilds", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
   const appId = c.req.param("app_id");
+  const ownedBot = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!ownedBot) return c.json({ error: "Bot not found" }, 404);
+
   try {
-    const apps = await sql`SELECT discord_token FROM apps WHERE id = ${appId} LIMIT 1`;
-    if (apps && apps.length > 0 && apps[0].discord_token) {
+    if (ownedBot.discord_token) {
       const res = await fetch("https://discord.com/api/v10/users/@me/guilds?with_counts=true", {
-        headers: { Authorization: `Bot ${apps[0].discord_token}` },
+        headers: { Authorization: `Bot ${ownedBot.discord_token}` },
       });
       if (res.ok) {
         const guilds = await res.json();
@@ -1316,36 +1680,546 @@ app.get("/v1/apps/:app_id/guilds", async (c) => {
 app.get("/v1/apps/:app_id/gateway", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
-  const appId = c.req.param("app_id");
-  let guildCount = 1;
-  let connected = false;
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
 
-  try {
-    const apps = await sql`
-      SELECT id, name, discord_id, discord_token, enabled, plan, custom_branding, discord_status
-      FROM apps
-      WHERE id = ${appId}
-      LIMIT 1
-    `;
-    if (apps && apps.length > 0) {
-      const botApp = apps[0];
-      connected = !!botApp.enabled;
-      if (connected) {
-        c.executionCtx.waitUntil(maintainBotGateway(botApp, sql, 25000));
-      }
-    }
-  } catch {}
+  const appId = c.req.param("app_id");
+  const botApp = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!botApp) return c.json({ error: "Bot not found" }, 404);
+
+  const connected = !!botApp.enabled;
+  if (connected) {
+    c.executionCtx.waitUntil(maintainBotGateway(botApp, sql, 25000));
+  }
 
   return c.json({
     connected,
     serverless: true,
     last_ping_at: new Date().toISOString(),
-    guild_count: guildCount,
+    guild_count: 1,
   });
 });
 
 // ============================================================================
-// Dodo Payments Integration (Test Mode & Live Mode)
+// Task 5: Multi-Rank Super Admin & Staff Panel (/api/admin/*) with Hardened RBAC
+// ============================================================================
+
+async function requireStaffRole(
+  c: any,
+  sql: any,
+  minimumRole: StaffRole
+): Promise<{ user: AuthenticatedUser } | { errorResponse: Response }> {
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) {
+    return { errorResponse: c.json({ error: "Unauthorized: Valid session required" }, 401) };
+  }
+  if (authUser.is_banned) {
+    return { errorResponse: c.json({ error: "Forbidden: Account suspended" }, 403) };
+  }
+  if (!hasRequiredRole(authUser.role, minimumRole)) {
+    return {
+      errorResponse: c.json(
+        {
+          error: `Forbidden: Requires ${minimumRole} clearance or higher (your role: ${authUser.role})`,
+        },
+        403
+      ),
+    };
+  }
+  return { user: authUser };
+}
+
+// 1. Admin Overview (SUPPORT, MODERATOR, ADMIN, FOUNDER)
+app.get("/api/admin/overview", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const check = await requireStaffRole(c, sql, "SUPPORT");
+  if ("errorResponse" in check) return check.errorResponse;
+  const staff = check.user;
+
+  const [usersList, botsList, recentRateLimits, spikeBots, auditLogs] = await Promise.all([
+    sql`
+      SELECT id, email, display_name, discord_id, discord_username, discord_avatar, role, plan, COALESCE(extra_bot_slots, 0) AS extra_bot_slots, COALESCE(is_banned, false) AS is_banned, ban_reason, created_at, updated_at
+      FROM users
+      ORDER BY
+        CASE role
+          WHEN 'FOUNDER' THEN 5
+          WHEN 'ADMIN' THEN 4
+          WHEN 'MODERATOR' THEN 3
+          WHEN 'SUPPORT' THEN 2
+          ELSE 1
+        END DESC,
+        created_at DESC
+      LIMIT 200
+    `.catch(() => []),
+    sql`
+      SELECT id, user_id, owner_user_id, name, description, enabled, discord_id, discord_avatar, discord_token, plan, custom_branding, subscription_status, created_at, updated_at
+      FROM apps
+      ORDER BY created_at DESC
+      LIMIT 200
+    `.catch(() => []),
+    sql`
+      SELECT l.id, l.app_id, l.user_id, l.message, l.level, l.details, l.created_at, a.name AS bot_name, a.discord_id AS bot_discord_id, a.user_id AS owner_discord_id
+      FROM logs l
+      LEFT JOIN apps a ON a.id = l.app_id
+      WHERE l.level = 'error' OR l.message ILIKE '%429%' OR l.message ILIKE '%rate limit%'
+      ORDER BY l.created_at DESC
+      LIMIT 50
+    `.catch(() => []),
+    sql`
+      SELECT a.id AS app_id, a.name AS bot_name, a.user_id AS owner_discord_id, a.owner_user_id, a.enabled, COUNT(l.id)::int AS recent_events
+      FROM apps a
+      LEFT JOIN logs l ON l.app_id = a.id AND l.created_at > NOW() - INTERVAL '1 hour'
+      GROUP BY a.id, a.name, a.user_id, a.owner_user_id, a.enabled
+      ORDER BY recent_events DESC
+      LIMIT 25
+    `.catch(() => []),
+    sql`
+      SELECT id, actor_discord_id, actor_username, actor_role, target_id, action_type, details, ip_address, created_at
+      FROM staff_audit_logs
+      ORDER BY created_at DESC
+      LIMIT 100
+    `.catch(() => []),
+  ]);
+
+  const founderId = (c.env.FOUNDER_DISCORD_ID || DEFAULT_FOUNDER_DISCORD_ID).trim();
+  const normalizedUsers = (usersList || []).map((u: any) => ({
+    ...u,
+    role: String(u.discord_id) === founderId ? "FOUNDER" : normalizeStaffRole(u.role),
+    extra_bot_slots: Math.max(0, Number(u.extra_bot_slots || 0)),
+    is_banned: String(u.discord_id) === founderId ? false : Boolean(u.is_banned),
+  }));
+
+  const sanitizedBots = (botsList || []).map((b: any) => sanitizeBotForClient(b));
+
+  return c.json({
+    staff_user: staff,
+    founder_discord_id: founderId,
+    stats: {
+      total_users: normalizedUsers.length,
+      total_bots: sanitizedBots.length,
+      active_bots: sanitizedBots.filter((b: any) => b.enabled).length,
+      rate_limit_alerts: (recentRateLimits || []).length,
+    },
+    users: normalizedUsers,
+    bots: sanitizedBots,
+    abuse_radar: {
+      rate_limit_logs: recentRateLimits || [],
+      high_activity_bots: spikeBots || [],
+    },
+    audit_logs: auditLogs || [],
+  });
+});
+
+// 2. Role & Staff Access Manager (FOUNDER ONLY)
+app.post("/api/admin/staff/role", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const check = await requireStaffRole(c, sql, "FOUNDER");
+  if ("errorResponse" in check) return check.errorResponse;
+  const founder = check.user;
+
+  const body = await c.req.json();
+  const targetDiscordId = String(body.discord_id || "").trim();
+  const requestedRole = normalizeStaffRole(body.role);
+  const founderId = (c.env.FOUNDER_DISCORD_ID || DEFAULT_FOUNDER_DISCORD_ID).trim();
+
+  if (!/^\d{17,20}$/.test(targetDiscordId)) {
+    return c.json({ error: "A valid 17–20 digit Discord User ID is required" }, 400);
+  }
+
+  // Anti-Privilege-Escalation Guard: Founder cannot be demoted
+  if (targetDiscordId === founderId && requestedRole !== "FOUNDER") {
+    return c.json({ error: "Cannot demote or modify the Founder's role" }, 403);
+  }
+
+  const finalRole: StaffRole = targetDiscordId === founderId ? "FOUNDER" : requestedRole;
+  const userId = `usr_${targetDiscordId}`;
+
+  // Upsert user so Founder can pre-authorize future staff before their first login
+  const rows = await sql`
+    INSERT INTO users (
+      id, email, display_name, discord_id, discord_username, role, created_at, updated_at
+    ) VALUES (
+      ${userId},
+      ${`${targetDiscordId}@discord.user`},
+      ${body.display_name || `Discord User (${targetDiscordId})`},
+      ${targetDiscordId},
+      ${body.username || targetDiscordId},
+      ${finalRole},
+      NOW(),
+      NOW()
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      role = ${finalRole},
+      updated_at = NOW()
+    RETURNING id, email, display_name, discord_id, discord_username, discord_avatar, role, plan, COALESCE(extra_bot_slots, 0) AS extra_bot_slots, COALESCE(is_banned, false) AS is_banned, created_at
+  `;
+
+  await writeStaffAuditLog(
+    sql,
+    founder,
+    targetDiscordId,
+    finalRole === "USER" ? "REVOKE_STAFF_ROLE" : "ASSIGN_STAFF_ROLE",
+    { assigned_role: finalRole, target_discord_id: targetDiscordId },
+    getClientIp(c)
+  );
+
+  return c.json({ success: true, user: rows[0] });
+});
+
+// 3. Global Bot Inspector: View Bot Error & Execution Logs (SUPPORT, MODERATOR, ADMIN, FOUNDER)
+app.get("/api/admin/bots/:id/logs", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const check = await requireStaffRole(c, sql, "SUPPORT");
+  if ("errorResponse" in check) return check.errorResponse;
+
+  const botId = c.req.param("id");
+  const rows = await sql`
+    SELECT id, app_id, user_id, message, level, details, created_at
+    FROM logs
+    WHERE app_id = ${botId}
+    ORDER BY created_at DESC
+    LIMIT 100
+  `;
+  return c.json(rows || []);
+});
+
+// 4. Global Bot Inspector: Disconnect / Suspend or Resume Bot (MODERATOR, ADMIN, FOUNDER)
+app.post("/api/admin/bots/:id/suspend", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const check = await requireStaffRole(c, sql, "MODERATOR");
+  if ("errorResponse" in check) return check.errorResponse;
+  const staff = check.user;
+
+  const botId = c.req.param("id");
+  const body = await c.req.json().catch(() => ({}));
+  const shouldEnable = body.enabled === true;
+
+  const existingRows = await sql`
+    SELECT id, user_id, owner_user_id, name, discord_id, discord_token, enabled
+    FROM apps
+    WHERE id = ${botId}
+    LIMIT 1
+  `;
+  if (!existingRows || existingRows.length === 0) {
+    return c.json({ error: "Bot not found" }, 404);
+  }
+  const bot = existingRows[0];
+
+  // Prevent non-Founder staff from suspending the Founder's own bots
+  const founderId = (c.env.FOUNDER_DISCORD_ID || DEFAULT_FOUNDER_DISCORD_ID).trim();
+  const botOwnerDiscordId =
+    bot.user_id || String(bot.owner_user_id || "").replace(/^usr_/, "");
+  if (botOwnerDiscordId === founderId && staff.role !== "FOUNDER" && !shouldEnable) {
+    return c.json({ error: "Forbidden: Cannot suspend bots owned by the Founder" }, 403);
+  }
+
+  if (!shouldEnable) {
+    disconnectBotGatewayImmediate(botId);
+    c.executionCtx.waitUntil(
+      forceDiscordBotOfflineAndClearCommands(undefined, bot.discord_token)
+    );
+  }
+
+  const updated = await sql`
+    UPDATE apps
+    SET enabled = ${shouldEnable}, updated_at = NOW()
+    WHERE id = ${botId}
+    RETURNING id, user_id, owner_user_id, name, description, enabled, discord_id, discord_avatar, discord_token, plan, custom_branding, created_at, updated_at
+  `;
+
+  await writeStaffAuditLog(
+    sql,
+    staff,
+    botId,
+    shouldEnable ? "RESUME_BOT" : "SUSPEND_BOT",
+    { bot_name: bot.name, owner_discord_id: botOwnerDiscordId, enabled: shouldEnable },
+    getClientIp(c)
+  );
+
+  return c.json({
+    success: true,
+    bot: sanitizeBotForClient(updated[0]),
+  });
+});
+
+// 5. Token Vault: Reveal Raw Bot Token (FOUNDER ONLY)
+app.post("/api/admin/bots/:id/reveal-token", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const check = await requireStaffRole(c, sql, "FOUNDER");
+  if ("errorResponse" in check) return check.errorResponse;
+  const founder = check.user;
+
+  const botId = c.req.param("id");
+  const rows = await sql`
+    SELECT id, name, discord_id, user_id, owner_user_id, discord_token
+    FROM apps
+    WHERE id = ${botId}
+    LIMIT 1
+  `;
+  if (!rows || rows.length === 0) {
+    return c.json({ error: "Bot not found" }, 404);
+  }
+  const bot = rows[0];
+
+  await writeStaffAuditLog(
+    sql,
+    founder,
+    botId,
+    "REVEAL_BOT_TOKEN",
+    {
+      bot_name: bot.name,
+      bot_discord_id: bot.discord_id,
+      owner_discord_id: bot.user_id || String(bot.owner_user_id || "").replace(/^usr_/, ""),
+    },
+    getClientIp(c)
+  );
+
+  return c.json({
+    bot_id: bot.id,
+    bot_name: bot.name,
+    discord_token: bot.discord_token || "",
+  });
+});
+
+// 6. Permanently Purge Bot (FOUNDER ONLY)
+app.delete("/api/admin/bots/:id", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const check = await requireStaffRole(c, sql, "FOUNDER");
+  if ("errorResponse" in check) return check.errorResponse;
+  const founder = check.user;
+
+  const botId = c.req.param("id");
+  const existing = await sql`
+    SELECT id, name, user_id, owner_user_id, discord_id, discord_token
+    FROM apps
+    WHERE id = ${botId}
+    LIMIT 1
+  `;
+  if (!existing || existing.length === 0) {
+    return c.json({ error: "Bot not found" }, 404);
+  }
+  const bot = existing[0];
+
+  disconnectBotGatewayImmediate(botId);
+  await sql`DELETE FROM commands WHERE app_id = ${botId}`;
+  await sql`DELETE FROM event_listeners WHERE app_id = ${botId}`.catch(() => {});
+  await sql`DELETE FROM logs WHERE app_id = ${botId}`.catch(() => {});
+  await sql`DELETE FROM apps WHERE id = ${botId}`;
+
+  c.executionCtx.waitUntil(
+    forceDiscordBotOfflineAndClearCommands(bot.discord_id, bot.discord_token)
+  );
+
+  await writeStaffAuditLog(
+    sql,
+    founder,
+    botId,
+    "PURGE_BOT",
+    {
+      bot_name: bot.name,
+      bot_discord_id: bot.discord_id,
+      owner_discord_id: bot.user_id || String(bot.owner_user_id || "").replace(/^usr_/, ""),
+    },
+    getClientIp(c)
+  );
+
+  return c.json({ success: true });
+});
+
+// 7. User Directory & Plan Override / Ban Manager (ADMIN & FOUNDER)
+app.patch("/api/admin/users/:discord_id", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const check = await requireStaffRole(c, sql, "ADMIN");
+  if ("errorResponse" in check) return check.errorResponse;
+  const staff = check.user;
+
+  const targetDiscordId = c.req.param("discord_id");
+  const founderId = (c.env.FOUNDER_DISCORD_ID || DEFAULT_FOUNDER_DISCORD_ID).trim();
+
+  // Anti-Privilege-Escalation Guard: No ADMIN can ever modify, ban, or demote the FOUNDER
+  if (targetDiscordId === founderId && staff.role !== "FOUNDER") {
+    return c.json(
+      { error: "Forbidden: Cannot modify, ban, or alter the Founder account" },
+      403
+    );
+  }
+
+  const body = await c.req.json();
+  const nextPlan =
+    body.plan === "studio" || body.plan === "pro" || body.plan === "free"
+      ? body.plan
+      : undefined;
+  const nextExtraSlots =
+    body.extra_bot_slots !== undefined
+      ? Math.max(0, parseInt(String(body.extra_bot_slots), 10) || 0)
+      : undefined;
+  const nextBanned =
+    targetDiscordId === founderId
+      ? false
+      : typeof body.is_banned === "boolean"
+      ? body.is_banned
+      : undefined;
+
+  const userId = `usr_${targetDiscordId}`;
+
+  const updatedRows = await sql`
+    UPDATE users
+    SET
+      plan = COALESCE(${nextPlan ?? null}, plan),
+      extra_bot_slots = COALESCE(${nextExtraSlots ?? null}, extra_bot_slots),
+      is_banned = COALESCE(${nextBanned ?? null}, is_banned),
+      ban_reason = CASE WHEN ${body.ban_reason !== undefined} THEN ${body.ban_reason} ELSE ban_reason END,
+      updated_at = NOW()
+    WHERE discord_id = ${targetDiscordId} OR id = ${userId}
+    RETURNING id, email, display_name, discord_id, discord_username, discord_avatar, role, plan, COALESCE(extra_bot_slots, 0) AS extra_bot_slots, COALESCE(is_banned, false) AS is_banned, ban_reason, created_at
+  `;
+
+  if (!updatedRows || updatedRows.length === 0) {
+    return c.json({ error: "User not found" }, 404);
+  }
+
+  if (nextPlan) {
+    const unlockBranding = nextPlan === "pro" || nextPlan === "studio";
+    await sql`
+      UPDATE apps
+      SET plan = ${nextPlan}, custom_branding = ${unlockBranding}, updated_at = NOW()
+      WHERE user_id = ${targetDiscordId} OR owner_user_id = ${userId}
+    `.catch(() => {});
+  }
+
+  if (nextBanned === true) {
+    const userBots = await sql`
+      SELECT id, discord_id, discord_token
+      FROM apps
+      WHERE user_id = ${targetDiscordId} OR owner_user_id = ${userId}
+    `.catch(() => []);
+    for (const b of userBots || []) {
+      disconnectBotGatewayImmediate(b.id);
+      c.executionCtx.waitUntil(
+        forceDiscordBotOfflineAndClearCommands(undefined, b.discord_token)
+      );
+    }
+    await sql`
+      UPDATE apps SET enabled = false, updated_at = NOW()
+      WHERE user_id = ${targetDiscordId} OR owner_user_id = ${userId}
+    `.catch(() => {});
+  }
+
+  await writeStaffAuditLog(
+    sql,
+    staff,
+    targetDiscordId,
+    nextBanned !== undefined
+      ? nextBanned
+        ? "BAN_USER"
+        : "UNBAN_USER"
+      : "OVERRIDE_USER_PLAN_OR_SLOTS",
+    {
+      plan: nextPlan,
+      extra_bot_slots: nextExtraSlots,
+      is_banned: nextBanned,
+    },
+    getClientIp(c)
+  );
+
+  return c.json({ success: true, user: updatedRows[0] });
+});
+
+// 8. Abuse & Rate-Limit Radar: 1-Click "Ban User & Purge All Bots" Emergency Switch (MODERATOR, ADMIN, FOUNDER)
+app.post("/api/admin/abuse/ban-and-purge", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const check = await requireStaffRole(c, sql, "MODERATOR");
+  if ("errorResponse" in check) return check.errorResponse;
+  const staff = check.user;
+
+  const body = await c.req.json();
+  const targetDiscordId = String(body.discord_id || "").trim();
+  const founderId = (c.env.FOUNDER_DISCORD_ID || DEFAULT_FOUNDER_DISCORD_ID).trim();
+
+  if (!targetDiscordId) {
+    return c.json({ error: "target discord_id is required" }, 400);
+  }
+
+  // Never allow banning or purging the Founder
+  if (targetDiscordId === founderId) {
+    return c.json({ error: "Forbidden: Cannot ban or purge the Founder account" }, 403);
+  }
+
+  const userId = `usr_${targetDiscordId}`;
+
+  // Also prevent MODERATOR from banning an ADMIN
+  const targetRows = await sql`
+    SELECT id, role FROM users WHERE discord_id = ${targetDiscordId} OR id = ${userId} LIMIT 1
+  `.catch(() => []);
+  if (targetRows?.[0]) {
+    const targetRole = normalizeStaffRole(targetRows[0].role);
+    if (hasRequiredRole(targetRole, "ADMIN") && staff.role !== "FOUNDER") {
+      return c.json({ error: "Forbidden: Only the Founder can ban an Admin" }, 403);
+    }
+  }
+
+  // 1. Ban user account
+  await sql`
+    UPDATE users
+    SET is_banned = true, ban_reason = ${body.reason || "Emergency Abuse & Raid Mitigation"}, updated_at = NOW()
+    WHERE discord_id = ${targetDiscordId} OR id = ${userId}
+  `.catch(() => {});
+
+  // 2. Find, disconnect, and purge all bots owned by this user
+  const userBots = await sql`
+    SELECT id, name, discord_id, discord_token
+    FROM apps
+    WHERE user_id = ${targetDiscordId} OR owner_user_id = ${userId}
+  `.catch(() => []);
+
+  for (const b of userBots || []) {
+    disconnectBotGatewayImmediate(b.id);
+    await sql`DELETE FROM commands WHERE app_id = ${b.id}`.catch(() => {});
+    await sql`DELETE FROM event_listeners WHERE app_id = ${b.id}`.catch(() => {});
+    await sql`DELETE FROM logs WHERE app_id = ${b.id}`.catch(() => {});
+    await sql`DELETE FROM apps WHERE id = ${b.id}`.catch(() => {});
+    c.executionCtx.waitUntil(
+      forceDiscordBotOfflineAndClearCommands(b.discord_id, b.discord_token)
+    );
+  }
+
+  await writeStaffAuditLog(
+    sql,
+    staff,
+    targetDiscordId,
+    "EMERGENCY_BAN_AND_PURGE",
+    {
+      purged_bot_count: (userBots || []).length,
+      reason: body.reason || "Emergency Abuse & Raid Mitigation",
+    },
+    getClientIp(c)
+  );
+
+  return c.json({
+    success: true,
+    banned_discord_id: targetDiscordId,
+    purged_bots: (userBots || []).length,
+  });
+});
+
+// ============================================================================
+// Dodo Payments Integration (Verified Webhooks + Self-Serve Expansion Packs)
 // ============================================================================
 
 async function handleVerifiedDodoWebhookRaw(
@@ -1375,8 +2249,10 @@ async function handleVerifiedDodoWebhookRaw(
   const data: any = event.data || {};
   const metadata: any = data.metadata || {};
   let targetAppId: string | null = metadata.app_id || null;
+  const targetDiscordId: string | null = metadata.discord_id || null;
+  const targetUserId: string | null =
+    metadata.user_id || (targetDiscordId ? `usr_${targetDiscordId}` : null);
 
-  // Resolve app by dodo_subscription_id or dodo_customer_id if metadata.app_id was not on the event
   if (!targetAppId && data.subscription_id) {
     const subRows = await sql`
       SELECT id FROM apps WHERE dodo_subscription_id = ${data.subscription_id} LIMIT 1
@@ -1404,8 +2280,16 @@ async function handleVerifiedDodoWebhookRaw(
 
   // Determine plan slug from metadata or product_id
   const resolvePlanFromEvent = (): VelocePlanSlug => {
+    if (metadata.plan === "extra_slots_10") return "extra_slots_10";
     if (metadata.plan === "studio") return "studio";
     if (metadata.plan === "pro") return "pro";
+    if (
+      data.product_id &&
+      (data.product_id === config.extraSlotsProductId ||
+        String(data.product_id).includes("extra_slots"))
+    ) {
+      return "extra_slots_10";
+    }
     if (
       data.product_id &&
       (data.product_id === config.studioProductId ||
@@ -1413,27 +2297,69 @@ async function handleVerifiedDodoWebhookRaw(
     ) {
       return "studio";
     }
+    if (data.total_amount === 499 || data.recurring_pre_tax_amount === 499) {
+      return "extra_slots_10";
+    }
     if (data.total_amount === 1499 || data.recurring_pre_tax_amount === 1499) {
       return "studio";
     }
     return "pro";
   };
 
+  const planSlug = resolvePlanFromEvent();
+
+  // Handle +10 Extra Bot Slots Expansion Pack ($4.99/mo) webhook
+  if (
+    planSlug === "extra_slots_10" &&
+    (eventType === "subscription.active" || eventType === "payment.succeeded")
+  ) {
+    const slotsToAdd = Math.max(10, Number(metadata.extra_bot_slots || 10));
+    if (targetUserId || targetDiscordId) {
+      await sql`
+        UPDATE users
+        SET
+          extra_bot_slots = COALESCE(extra_bot_slots, 0) + ${slotsToAdd},
+          updated_at = NOW()
+        WHERE id = ${targetUserId || ""} OR discord_id = ${targetDiscordId || ""}
+      `.catch(() => {});
+    } else if (targetAppId) {
+      const appOwnerRows = await sql`
+        SELECT owner_user_id, user_id FROM apps WHERE id = ${targetAppId} LIMIT 1
+      `.catch(() => []);
+      if (appOwnerRows?.[0]) {
+        await sql`
+          UPDATE users
+          SET
+            extra_bot_slots = COALESCE(extra_bot_slots, 0) + ${slotsToAdd},
+            updated_at = NOW()
+          WHERE id = ${appOwnerRows[0].owner_user_id} OR discord_id = ${appOwnerRows[0].user_id}
+        `.catch(() => {});
+      }
+    }
+    return {
+      received: true,
+      duplicate: false,
+      event_type: eventType,
+      plan: "extra_slots_10",
+      extra_slots_added: slotsToAdd,
+    };
+  }
+
   if (targetAppId) {
     const subId = data.subscription_id || null;
     const cusId = data.customer?.customer_id || null;
     const nextBilling = data.next_billing_date || null;
+    const tierSlug: "pro" | "studio" = planSlug === "studio" ? "studio" : "pro";
 
     switch (eventType) {
       case "subscription.active":
       case "subscription.renewed":
       case "subscription.unpaused": {
-        const planSlug = resolvePlanFromEvent();
         const extraSlotsPurchased = Math.max(0, Number(metadata.extra_bot_slots || 0));
         const updatedAppRows = await sql`
           UPDATE apps
           SET
-            plan = ${planSlug},
+            plan = ${tierSlug},
             custom_branding = true,
             subscription_status = 'active',
             cancel_at_next_billing_date = false,
@@ -1442,22 +2368,23 @@ async function handleVerifiedDodoWebhookRaw(
             next_billing_date = COALESCE(${nextBilling}::timestamptz, next_billing_date, NOW() + INTERVAL '30 days'),
             updated_at = NOW()
           WHERE id = ${targetAppId}
-          RETURNING owner_user_id
+          RETURNING owner_user_id, user_id
         `;
-        const ownerId = updatedAppRows?.[0]?.owner_user_id || metadata.user_id || "usr_admin";
+        const ownerId = updatedAppRows?.[0]?.owner_user_id || targetUserId || "";
+        const ownerDiscordId = updatedAppRows?.[0]?.user_id || targetDiscordId || "";
         await sql`
           UPDATE users
           SET
-            plan = CASE WHEN plan = 'studio' THEN 'studio' ELSE ${planSlug} END,
+            plan = CASE WHEN plan = 'studio' THEN 'studio' ELSE ${tierSlug} END,
             extra_bot_slots = COALESCE(extra_bot_slots, 0) + ${extraSlotsPurchased},
             updated_at = NOW()
-          WHERE id = ${ownerId}
+          WHERE id = ${ownerId} OR discord_id = ${ownerDiscordId}
         `.catch(() => {});
         await sql`
           INSERT INTO logs (app_id, message, level, details, created_at)
           VALUES (
             ${targetAppId},
-            ${`Dodo Payments webhook (${eventType}): Upgraded bot to ${planSlug.toUpperCase()} plan and unlocked custom branding.`},
+            ${`Dodo Payments webhook (${eventType}): Upgraded bot to ${tierSlug.toUpperCase()} plan and unlocked custom branding.`},
             'info',
             ${JSON.stringify({ webhook_id: webhookId, subscription_id: subId, customer_id: cusId })}::jsonb,
             NOW()
@@ -1468,13 +2395,12 @@ async function handleVerifiedDodoWebhookRaw(
 
       case "subscription.plan_changed":
       case "subscription.updated": {
-        const planSlug = resolvePlanFromEvent();
         const status = data.status || "active";
         const cancelAtEnd = Boolean(data.cancel_at_next_billing_date);
         await sql`
           UPDATE apps
           SET
-            plan = ${status === "active" || status === "past_due" ? planSlug : "free"},
+            plan = ${status === "active" || status === "past_due" ? tierSlug : "free"},
             custom_branding = ${status === "active" || status === "past_due"},
             subscription_status = ${status},
             cancel_at_next_billing_date = ${cancelAtEnd},
@@ -1488,7 +2414,6 @@ async function handleVerifiedDodoWebhookRaw(
       }
 
       case "subscription.past_due": {
-        // Customer keeps access during the payment grace period
         await sql`
           UPDATE apps
           SET
@@ -1513,23 +2438,12 @@ async function handleVerifiedDodoWebhookRaw(
             updated_at = NOW()
           WHERE id = ${targetAppId}
         `;
-        await sql`
-          INSERT INTO logs (app_id, message, level, details, created_at)
-          VALUES (
-            ${targetAppId},
-            ${`Dodo Payments webhook (${eventType}): Subscription moved to ${nextStatus}. Reverted bot to Free Starter plan.`},
-            'warn',
-            ${JSON.stringify({ webhook_id: webhookId, subscription_id: subId })}::jsonb,
-            NOW()
-          )
-        `.catch(() => {});
         break;
       }
 
       case "subscription.cancelled": {
         const cancelAtPeriodEnd = Boolean(data.cancel_at_next_billing_date);
         if (cancelAtPeriodEnd) {
-          // Keep paid plan active until period end
           await sql`
             UPDATE apps
             SET
@@ -1539,7 +2453,6 @@ async function handleVerifiedDodoWebhookRaw(
             WHERE id = ${targetAppId}
           `;
         } else {
-          // Immediate cancellation revokes paid access right away
           await sql`
             UPDATE apps
             SET
@@ -1565,49 +2478,10 @@ async function handleVerifiedDodoWebhookRaw(
             updated_at = NOW()
           WHERE id = ${targetAppId}
         `;
-        await sql`
-          INSERT INTO logs (app_id, message, level, details, created_at)
-          VALUES (
-            ${targetAppId},
-            'Dodo Payments webhook (refund.succeeded): Refund processed, reverted bot to Free Starter plan.',
-            'info',
-            ${JSON.stringify({ webhook_id: webhookId })}::jsonb,
-            NOW()
-          )
-        `.catch(() => {});
-        break;
-      }
-
-      case "payment.succeeded": {
-        await sql`
-          INSERT INTO logs (app_id, message, level, details, created_at)
-          VALUES (
-            ${targetAppId},
-            ${`Dodo Payments webhook (payment.succeeded): Payment ${data.payment_id || ""} confirmed.`},
-            'info',
-            ${JSON.stringify({ webhook_id: webhookId, payment_id: data.payment_id, total_amount: data.total_amount })}::jsonb,
-            NOW()
-          )
-        `.catch(() => {});
-        break;
-      }
-
-      case "payment.failed": {
-        await sql`
-          INSERT INTO logs (app_id, message, level, details, created_at)
-          VALUES (
-            ${targetAppId},
-            ${`Dodo Payments webhook (payment.failed): Payment attempt declined (${data.error_message || "card declined"}).`},
-            'error',
-            ${JSON.stringify({ webhook_id: webhookId, payment_id: data.payment_id, error_code: data.error_code })}::jsonb,
-            NOW()
-          )
-        `.catch(() => {});
         break;
       }
     }
 
-    // Refresh bot gateway presence if the bot is enabled
     if (waitUntil) {
       waitUntil(
         (async () => {
@@ -1671,168 +2545,61 @@ async function handleDodoWebhookRoute(c: any) {
 app.post("/v1/webhooks/dodo", handleDodoWebhookRoute);
 app.post("/api/webhook/dodo", handleDodoWebhookRoute);
 
-// Get Dodo Billing Status, Active Products & Recent Verified Webhooks
-app.get("/v1/billing/status", async (c) => {
+// Create Dodo Payments Checkout Session (Supports Pro $5.99, Studio $14.99, and +10 Extra Bot Slots $4.99)
+async function handleCreateCheckoutSession(c: any) {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
-  const config = await loadDodoRuntimeConfig(sql, c.env);
 
-  const recentWebhooks = await sql`
-    SELECT webhook_id, event_type, app_id, created_at
-    FROM dodo_webhook_events
-    ORDER BY created_at DESC
-    LIMIT 10
-  `.catch(() => []);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
 
-  return c.json({
-    environment: config.environment,
-    base_url:
-      config.environment === "live_mode"
-        ? "https://live.dodopayments.com"
-        : "https://test.dodopayments.com",
-    api_key_configured: Boolean(config.apiKey),
-    api_key_masked: config.apiKey
-      ? `${config.apiKey.slice(0, 10)}...${config.apiKey.slice(-4)}`
-      : null,
-    webhook_key_configured: Boolean(config.webhookKey),
-    pro_product_id: config.proProductId || "pdt_test_veloce_pro_599",
-    studio_product_id: config.studioProductId || "pdt_test_veloce_studio_1499",
-    webhook_endpoint: `${getPublicOrigin(c)}/v1/webhooks/dodo`,
-    plans: PLAN_CATALOG,
-    recent_webhooks: recentWebhooks,
-  });
-});
-
-// Configure Dodo Payments API Key / Test Mode Settings & Auto-Provision Products
-app.post("/v1/billing/config", async (c) => {
-  const sql = neon(c.env.DATABASE_URL);
-  await ensureSchema(sql);
   const body = await c.req.json();
-
-  if (body.api_key !== undefined) {
-    const val = String(body.api_key).trim();
-    if (val) {
-      await sql`
-        INSERT INTO dodo_config (key, value, updated_at)
-        VALUES ('api_key', ${val}, NOW())
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-      `;
-    } else {
-      await sql`DELETE FROM dodo_config WHERE key = 'api_key'`;
-    }
-  }
-
-  if (body.webhook_key !== undefined) {
-    const val = String(body.webhook_key).trim();
-    if (val) {
-      await sql`
-        INSERT INTO dodo_config (key, value, updated_at)
-        VALUES ('webhook_key', ${val}, NOW())
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-      `;
-    }
-  }
-
-  if (body.environment !== undefined) {
-    const envVal = resolveDodoEnvironment(body.environment);
-    await sql`
-      INSERT INTO dodo_config (key, value, updated_at)
-      VALUES ('environment', ${envVal}, NOW())
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-    `;
-  }
-
-  if (body.pro_product_id !== undefined && String(body.pro_product_id).trim()) {
-    await sql`
-      INSERT INTO dodo_config (key, value, updated_at)
-      VALUES ('pro_product_id', ${String(body.pro_product_id).trim()}, NOW())
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-    `;
-  }
-
-  if (body.studio_product_id !== undefined && String(body.studio_product_id).trim()) {
-    await sql`
-      INSERT INTO dodo_config (key, value, updated_at)
-      VALUES ('studio_product_id', ${String(body.studio_product_id).trim()}, NOW())
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-    `;
-  }
-
-  const updatedConfig = await loadDodoRuntimeConfig(sql, c.env);
-  let provisioningError: string | null = null;
-  let products = {
-    proProductId: updatedConfig.proProductId || "pdt_test_veloce_pro_599",
-    studioProductId: updatedConfig.studioProductId || "pdt_test_veloce_studio_1499",
-    isLiveApi: false,
-  };
-
-  if (updatedConfig.apiKey) {
-    try {
-      products = await ensureDodoProducts(sql, updatedConfig);
-    } catch (err: any) {
-      provisioningError = err?.message || "Failed to auto-provision products in Dodo API";
-    }
-  }
-
-  return c.json({
-    success: true,
-    environment: updatedConfig.environment,
-    api_key_configured: Boolean(updatedConfig.apiKey),
-    pro_product_id: products.proProductId,
-    studio_product_id: products.studioProductId,
-    provisioning_error: provisioningError,
-  });
-});
-
-// Create Dodo Payments Checkout Session (POST /v1/billing/checkout)
-app.post("/v1/billing/checkout", async (c) => {
-  const sql = neon(c.env.DATABASE_URL);
-  await ensureSchema(sql);
-  const body = await c.req.json();
-
   const appId = String(body.app_id || "").trim();
-  const planSlug: VelocePlanSlug = body.plan === "studio" ? "studio" : "pro";
-  const customerEmail = String(body.customer_email || "developer@veloce.app").trim();
-  const customerName = String(body.customer_name || "Discord Bot Owner").trim();
+  const planSlug: VelocePlanSlug =
+    body.plan === "extra_slots_10"
+      ? "extra_slots_10"
+      : body.plan === "studio"
+      ? "studio"
+      : "pro";
+
+  const customerEmail = String(body.customer_email || authUser.email || "user@veloce.app").trim();
+  const customerName = String(body.customer_name || authUser.display_name || "Discord User").trim();
   const discountCode = body.discount_code ? String(body.discount_code).trim() : undefined;
 
-  if (!appId) {
-    return c.json({ error: "app_id is required" }, 400);
+  let botApp: any = null;
+  if (appId) {
+    botApp = await getOwnedBotOrNull(sql, appId, authUser);
+    if (!botApp) {
+      return c.json({ error: "Bot application not found" }, 404);
+    }
   }
-
-  const apps = await sql`
-    SELECT id, name, dodo_customer_id
-    FROM apps
-    WHERE id = ${appId}
-    LIMIT 1
-  `;
-  if (!apps || apps.length === 0) {
-    return c.json({ error: "Bot application not found" }, 404);
-  }
-  const botApp = apps[0];
 
   const config = await loadDodoRuntimeConfig(sql, c.env);
   const products = await ensureDodoProducts(sql, config).catch(() => ({
-    proProductId: config.proProductId || "pdt_test_veloce_pro_599",
-    studioProductId: config.studioProductId || "pdt_test_veloce_studio_1499",
+    proProductId: config.proProductId || "pdt_veloce_pro_599",
+    studioProductId: config.studioProductId || "pdt_veloce_studio_1499",
+    extraSlotsProductId: config.extraSlotsProductId || "pdt_veloce_extra_slots_499",
     isLiveApi: false,
   }));
 
-  // Map allowlisted plan slug to server-side product ID (never trust client product_id)
   const productId =
-    planSlug === "studio" ? products.studioProductId : products.proProductId;
-  const origin = getPublicOrigin(c);
-  const returnUrl = `${origin}/apps?dodo_checkout=return&app=${encodeURIComponent(
-    appId
-  )}&plan=${encodeURIComponent(planSlug)}`;
+    planSlug === "extra_slots_10"
+      ? products.extraSlotsProductId
+      : planSlug === "studio"
+      ? products.studioProductId
+      : products.proProductId;
 
-  // If a real Dodo API key is configured and sandbox simulation isn't forced, call Dodo Checkout Sessions API
-  if (config.apiKey && !body.force_sandbox) {
+  const origin = getPublicOrigin(c);
+  const returnUrl = `${origin}/apps?checkout=success&plan=${encodeURIComponent(planSlug)}${
+    appId ? `&app=${encodeURIComponent(appId)}` : ""
+  }`;
+
+  if (config.apiKey) {
     try {
       const client = createDodoClient(config);
       const session = await client.checkoutSessions.create({
         product_cart: [{ product_id: productId, quantity: 1 }],
-        customer: botApp.dodo_customer_id
+        customer: botApp?.dodo_customer_id
           ? { customer_id: botApp.dodo_customer_id }
           : { email: customerEmail, name: customerName },
         ...(discountCode ? { discount_codes: [discountCode] } : {}),
@@ -1844,9 +2611,11 @@ app.post("/v1/billing/checkout", async (c) => {
           show_order_details: true,
         },
         metadata: {
-          app_id: appId,
+          user_id: authUser.id,
+          discord_id: authUser.discord_id,
+          ...(appId ? { app_id: appId } : {}),
           plan: planSlug,
-          bot_name: botApp.name || "Discord Bot",
+          ...(planSlug === "extra_slots_10" ? { extra_bot_slots: "10" } : {}),
         },
         return_url: returnUrl,
       });
@@ -1863,49 +2632,37 @@ app.post("/v1/billing/checkout", async (c) => {
       console.error("Dodo checkoutSessions.create error:", err);
       return c.json(
         {
-          error:
-            err?.message ||
-            "Failed to create Dodo Payments checkout session. Check your Dodo test API key.",
+          error: err?.message || "Failed to initialize checkout session.",
         },
         502
       );
     }
   }
 
-  // Test Mode Interactive Checkout Session (when testing in test_mode without external API key or with force_sandbox)
-  const testSessionId = `cks_test_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
-  return c.json({
-    mode: "dodo_test_sandbox",
-    environment: "test_mode",
-    session_id: testSessionId,
-    checkout_url: `${origin}/apps?dodo_test_checkout=1&app=${encodeURIComponent(
-      appId
-    )}&plan=${encodeURIComponent(planSlug)}&session_id=${encodeURIComponent(testSessionId)}`,
-    product_id: productId,
-    plan: planSlug,
-    amount_cents: PLAN_CATALOG[planSlug].priceCents,
-    currency: "USD",
-  });
-});
+  return c.json(
+    {
+      error: "Payment gateway is being configured. Please try again shortly.",
+    },
+    503
+  );
+}
+
+app.post("/api/billing/checkout", handleCreateCheckoutSession);
+app.post("/v1/billing/checkout", handleCreateCheckoutSession);
 
 // Create Customer Portal Session (POST /v1/billing/portal)
 app.post("/v1/billing/portal", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
+  const authUser = await getVerifiedUser(c, sql);
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
   const body = await c.req.json();
   const appId = String(body.app_id || "").trim();
-
   if (!appId) return c.json({ error: "app_id is required" }, 400);
 
-  // Resolve customer_id strictly from server database record, never from client input
-  const rows = await sql`
-    SELECT id, dodo_customer_id, dodo_subscription_id, plan
-    FROM apps
-    WHERE id = ${appId}
-    LIMIT 1
-  `;
-  if (!rows || rows.length === 0) return c.json({ error: "App not found" }, 404);
-  const botApp = rows[0];
+  const botApp = await getOwnedBotOrNull(sql, appId, authUser);
+  if (!botApp) return c.json({ error: "App not found" }, 404);
 
   const config = await loadDodoRuntimeConfig(sql, c.env);
   if (config.apiKey && botApp.dodo_customer_id) {
@@ -1923,194 +2680,7 @@ app.post("/v1/billing/portal", async (c) => {
     }
   }
 
-  return c.json({
-    mode: "dodo_test_sandbox",
-    customer_id: botApp.dodo_customer_id || "cus_test_sandbox",
-    subscription_id: botApp.dodo_subscription_id || "sub_test_sandbox",
-  });
-});
-
-// Test Mode Webhook & Payment Method Simulator (verifies signature via client.webhooks.unwrap)
-app.post("/v1/billing/test-webhook", async (c) => {
-  const sql = neon(c.env.DATABASE_URL);
-  await ensureSchema(sql);
-  const config = await loadDodoRuntimeConfig(sql, c.env);
-
-  if (config.environment !== "test_mode") {
-    return c.json(
-      { error: "Test webhook simulation is only available in test_mode" },
-      403
-    );
-  }
-
-  const body = await c.req.json();
-  const appId = String(body.app_id || "").trim();
-  const planSlug: VelocePlanSlug = body.plan === "studio" ? "studio" : "pro";
-  const scenario = String(body.scenario || "card_success").trim();
-  const cardNumber = String(body.card_number || "").replace(/\s+/g, "");
-  const upiVpa = String(body.upi_vpa || "").trim().toLowerCase();
-
-  if (!appId) {
-    return c.json({ error: "app_id is required" }, 400);
-  }
-
-  // Evaluate official Dodo test card numbers & UPI VPAs from testing-and-go-live
-  let effectiveScenario = scenario;
-  if (cardNumber) {
-    if (cardNumber === "4242424242424242") effectiveScenario = "card_success";
-    else if (cardNumber === "4000000000000002") effectiveScenario = "card_decline";
-    else if (cardNumber === "4000000000009995") effectiveScenario = "insufficient_funds";
-    else if (cardNumber === "4000000000000341") effectiveScenario = "renewal_failure";
-    else effectiveScenario = "card_decline";
-  } else if (upiVpa) {
-    if (upiVpa === "success@upi") effectiveScenario = "upi_success";
-    else effectiveScenario = "upi_failure";
-  }
-
-  const subId = `sub_test_${appId.replace(/^app_/, "").slice(0, 12)}`;
-  const cusId = `cus_test_${appId.replace(/^app_/, "").slice(0, 12)}`;
-  const payId = `pay_test_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
-  const productId =
-    planSlug === "studio"
-      ? config.studioProductId || "pdt_test_veloce_studio_1499"
-      : config.proProductId || "pdt_test_veloce_pro_599";
-  const priceCents = PLAN_CATALOG[planSlug].priceCents;
-  const nextBillingIso = new Date(Date.now() + 30 * 86400 * 1000).toISOString();
-
-  let eventType = "subscription.active";
-  let eventData: Record<string, any> = {
-    payload_type: "Subscription",
-    subscription_id: subId,
-    product_id: productId,
-    status: "active",
-    recurring_pre_tax_amount: priceCents,
-    currency: "USD",
-    cancel_at_next_billing_date: false,
-    next_billing_date: nextBillingIso,
-    customer: {
-      customer_id: cusId,
-      email: "developer@veloce.app",
-      name: "Discord Bot Owner",
-    },
-    metadata: {
-      app_id: appId,
-      plan: planSlug,
-    },
-  };
-
-  if (effectiveScenario === "card_decline" || effectiveScenario === "upi_failure") {
-    eventType = "payment.failed";
-    eventData = {
-      payload_type: "Payment",
-      payment_id: payId,
-      status: "failed",
-      error_code: "card_declined",
-      error_message:
-        effectiveScenario === "upi_failure"
-          ? "UPI payment failed (failure@upi)"
-          : "Card was declined by issuer (4000 0000 0000 0002)",
-      total_amount: priceCents,
-      currency: "USD",
-      customer: {
-        customer_id: cusId,
-        email: "developer@veloce.app",
-        name: "Discord Bot Owner",
-      },
-      metadata: { app_id: appId, plan: planSlug },
-    };
-  } else if (effectiveScenario === "insufficient_funds") {
-    eventType = "payment.failed";
-    eventData = {
-      payload_type: "Payment",
-      payment_id: payId,
-      status: "failed",
-      error_code: "insufficient_funds",
-      error_message: "Insufficient funds on card (4000 0000 0000 9995)",
-      total_amount: priceCents,
-      currency: "USD",
-      customer: {
-        customer_id: cusId,
-        email: "developer@veloce.app",
-        name: "Discord Bot Owner",
-      },
-      metadata: { app_id: appId, plan: planSlug },
-    };
-  } else if (effectiveScenario === "renewal_failure") {
-    eventType = "subscription.on_hold";
-    eventData.status = "on_hold";
-  } else if (effectiveScenario === "cancel_period_end") {
-    eventType = "subscription.cancelled";
-    eventData.status = "active";
-    eventData.cancel_at_next_billing_date = true;
-  } else if (effectiveScenario === "cancel_immediate") {
-    eventType = "subscription.cancelled";
-    eventData.status = "cancelled";
-    eventData.cancel_at_next_billing_date = false;
-  } else if (effectiveScenario === "refund") {
-    eventType = "refund.succeeded";
-    eventData = {
-      payload_type: "Refund",
-      refund_id: `rfnd_test_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`,
-      payment_id: payId,
-      status: "succeeded",
-      amount: priceCents,
-      currency: "USD",
-      customer: { customer_id: cusId, email: "developer@veloce.app" },
-      metadata: { app_id: appId, plan: planSlug },
-    };
-  }
-
-  const webhookId = `evt_test_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
-  const webhookTimestamp = String(Math.floor(Date.now() / 1000));
-  const rawPayload = JSON.stringify({
-    business_id: "bus_test_veloce",
-    type: eventType,
-    timestamp: new Date().toISOString(),
-    data: eventData,
-  });
-
-  // Sign with Standard Webhooks HMAC-SHA256 (`webhook-id.webhook-timestamp.raw_body`)
-  const webhookSignature = await signStandardWebhookPayload(
-    rawPayload,
-    config.webhookKey,
-    webhookId,
-    webhookTimestamp
-  );
-
-  // Dispatch through the real Dodo SDK `client.webhooks.unwrap()` handler
-  const webhookResult = await handleVerifiedDodoWebhookRaw(
-    sql,
-    config,
-    rawPayload,
-    {
-      "webhook-id": webhookId,
-      "webhook-signature": webhookSignature,
-      "webhook-timestamp": webhookTimestamp,
-    },
-    (p) => c.executionCtx.waitUntil(p)
-  );
-
-  const updatedApps = await sql`
-    SELECT id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
-    FROM apps
-    WHERE id = ${appId}
-    LIMIT 1
-  `;
-
-  return c.json({
-    success:
-      effectiveScenario === "card_success" ||
-      effectiveScenario === "upi_success" ||
-      effectiveScenario === "cancel_period_end" ||
-      effectiveScenario === "cancel_immediate" ||
-      effectiveScenario === "refund",
-    scenario: effectiveScenario,
-    webhook_id: webhookId,
-    event_type: eventType,
-    signature_verified: true,
-    webhook_result: webhookResult,
-    app: updatedApps[0] || null,
-  });
+  return c.json({ error: "No active billing portal session found for this bot." }, 404);
 });
 
 export default {

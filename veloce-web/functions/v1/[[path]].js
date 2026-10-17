@@ -15,8 +15,17 @@ export async function onRequest(context) {
   const targetUrl = `${upstreamBase.replace(/\/$/, "")}${url.pathname}${url.search}`;
   const headers = new Headers(context.request.headers);
   headers.delete("host");
+  headers.delete("x-cloudflare-pages-oauth-id");
+  headers.delete("x-cloudflare-pages-oauth-secret");
   headers.set("x-forwarded-host", url.host);
   headers.set("x-forwarded-proto", url.protocol.replace(":", ""));
+
+  if (context.env.DISCORD_CLIENT_ID) {
+    headers.set("x-cloudflare-pages-oauth-id", context.env.DISCORD_CLIENT_ID);
+  }
+  if (context.env.DISCORD_CLIENT_SECRET) {
+    headers.set("x-cloudflare-pages-oauth-secret", context.env.DISCORD_CLIENT_SECRET);
+  }
 
   const init = {
     method: context.request.method,

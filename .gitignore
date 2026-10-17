@@ -1,6 +1,7 @@
 # Environment and secrets
-.env
-.env*.local
+.env*
+!.env.example
+.dev.vars*
 *.pem
 *.key
 veloce.toml
@@ -38,6 +39,4 @@ data/
 Thumbs.db
 
 # Cloudflare Workers
-.dev.vars*
 .wrangler/
-
