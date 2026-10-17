@@ -7,14 +7,9 @@ import {
   ShieldCheck,
   Users,
   Bot,
-  Key,
   Ban,
   CheckCircle2,
   Trash2,
-  Eye,
-  EyeOff,
-  Copy,
-  Check,
   Search,
   Activity,
   FileText,
@@ -22,6 +17,8 @@ import {
   Lock,
   AlertTriangle,
   RefreshCw,
+  Eraser,
+  ShieldOff,
 } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -31,6 +28,7 @@ import {
   StaffRole,
   AdminOverviewResponse,
   AdminBotRecord,
+  TokenValidationResult,
   Log,
 } from "@/lib/api";
 import { useCurrentUser } from "@/lib/useAuth";
@@ -63,10 +61,11 @@ export default function SuperAdminPage() {
   const [staffUsername, setStaffUsername] = useState("");
   const [staffTargetRole, setStaffTargetRole] = useState<StaffRole>("ADMIN");
 
-  // 2. Global Bot Inspector & Token Vault State
+  // 2. Global Bot Inspector & Write-Only Token Diagnostics State
   const [botSearch, setBotSearch] = useState("");
-  const [revealedTokens, setRevealedTokens] = useState<Record<string, string>>({});
-  const [copiedBotId, setCopiedBotId] = useState<string | null>(null);
+  const [tokenDiagnostics, setTokenDiagnostics] = useState<
+    Record<string, TokenValidationResult>
+  >({});
   const [inspectingBot, setInspectingBot] = useState<AdminBotRecord | null>(null);
 
   // 3. User Directory & Plan Override State
@@ -121,19 +120,51 @@ export default function SuperAdminPage() {
     },
   });
 
-  const revealTokenMutation = useMutation({
-    mutationFn: (botId: string) => api.revealBotToken(botId),
+  const validateTokenMutation = useMutation({
+    mutationFn: (botId: string) => api.validateBotToken(botId),
     onSuccess: (res) => {
-      if (res.bot_token) {
-        setRevealedTokens((prev) => ({ ...prev, [res.bot_id]: res.bot_token! }));
-        toast.success(`Decrypted token for ${res.bot_name} (logged to audit trail)`);
+      setTokenDiagnostics((prev) => ({ ...prev, [res.bot_db_id]: res }));
+      if (res.token_status === "VALID") {
+        toast.success(
+          `Token VALID: ${res.bot_username} (${res.approximate_guild_count} guilds)`
+        );
       } else {
-        toast.warning("No raw token stored for this bot");
+        toast.error(`Token REVOKED_OR_INVALID for ${res.bot_username || res.bot_db_id}`);
       }
       queryClient.invalidateQueries({ queryKey: ["admin-overview"] });
     },
     onError: (err: any) => {
-      toast.error(err.message || "Failed to reveal bot token");
+      toast.error(err.message || "Failed to validate bot token");
+    },
+  });
+
+  const wipeTokenMutation = useMutation({
+    mutationFn: (botId: string) => api.wipeBotToken(botId),
+    onSuccess: (_, botId) => {
+      toast.success("Stored bot token wiped & bot disconnected (logged in Staff Audit Logs)");
+      setTokenDiagnostics((prev) => {
+        const next = { ...prev };
+        delete next[botId];
+        return next;
+      });
+      queryClient.invalidateQueries({ queryKey: ["admin-overview"] });
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Failed to wipe bot token");
+    },
+  });
+
+  const blacklistBotMutation = useMutation({
+    mutationFn: ({ botId, reason }: { botId: string; reason?: string }) =>
+      api.blacklistAdminBot(botId, reason),
+    onSuccess: (res) => {
+      toast.success(
+        `Bot purged & Application ID ${res.blacklisted_application_id} permanently blacklisted.`
+      );
+      queryClient.invalidateQueries({ queryKey: ["admin-overview"] });
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Failed to blacklist bot application ID");
     },
   });
 
@@ -174,7 +205,7 @@ export default function SuperAdminPage() {
       api.emergencyBanAndPurge(discordId, reason),
     onSuccess: (res) => {
       toast.success(
-        `Emergency Ban executed for ${res.discord_id}: ${res.purged_bots_count} bots terminated & purged.`
+        `Emergency Ban executed for ${res.banned_discord_id}: ${res.purged_bots} bots terminated & purged.`
       );
       queryClient.invalidateQueries({ queryKey: ["admin-overview"] });
     },
@@ -324,9 +355,9 @@ export default function SuperAdminPage() {
               </div>
             </div>
             <div className="p-4 rounded-2xl bg-card border border-border">
-              <div className="text-xs text-muted-foreground">Staff Members</div>
-              <div className="text-2xl font-extrabold text-amber-400 mt-1">
-                {(overview?.users || []).filter((u) => u.role !== "USER").length}
+              <div className="text-xs text-muted-foreground">Blacklisted Bot IDs</div>
+              <div className="text-2xl font-extrabold text-rose-400 mt-1">
+                {overview?.blacklisted_applications?.length ?? 0}
               </div>
             </div>
             <div className="p-4 rounded-2xl bg-card border border-border">
@@ -578,16 +609,16 @@ export default function SuperAdminPage() {
                 </div>
               )}
 
-              {/* 2. Global Bot Inspector & Token Vault */}
+              {/* 2. Global Bot Inspector & Write-Only Token Diagnostics */}
               {activeTab === "bots" && (
                 <div className="space-y-4">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div>
                       <h2 className="text-base font-bold text-foreground">
-                        Global Bot Inspector &amp; Token Vault
+                        Global Bot Inspector &amp; Write-Only Token Vault
                       </h2>
                       <p className="text-xs text-muted-foreground">
-                        SUPPORT+ can inspect metadata &amp; logs · MODERATOR+ can suspend bots · FOUNDER ONLY can reveal raw tokens or purge bots.
+                        Raw bot tokens are strictly write-only and never leave the backend. SUPPORT+ can 1-Click Validate &amp; Inspect Tokens · MODERATOR+ can Wipe Token &amp; Disconnect · ADMIN+ can Wipe &amp; Blacklist Bot ID.
                       </p>
                     </div>
                     <div className="relative w-full sm:w-72">
@@ -609,19 +640,19 @@ export default function SuperAdminPage() {
                           <th className="py-3 px-4">Bot</th>
                           <th className="py-3 px-4">Owner Discord ID</th>
                           <th className="py-3 px-4">Status / Plan</th>
-                          <th className="py-3 px-4">Token Vault</th>
+                          <th className="py-3 px-4">Write-Only Token Diagnostics</th>
                           <th className="py-3 px-4 text-right">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-border/60">
                         {filteredBots.map((bot) => {
-                          const revealed = revealedTokens[bot.id];
+                          const diag = tokenDiagnostics[bot.id];
                           return (
                             <tr key={bot.id}>
                               <td className="py-3 px-4">
                                 <div className="font-bold text-foreground">{bot.name}</div>
                                 <div className="font-mono text-[11px] text-muted-foreground">
-                                  App: {bot.id} · Discord: {bot.discord_id}
+                                  App: {bot.id} · Discord ID: {bot.discord_id}
                                 </div>
                               </td>
                               <td className="py-3 px-4 font-mono text-muted-foreground">
@@ -641,7 +672,7 @@ export default function SuperAdminPage() {
                                         : "bg-rose-500/15 text-rose-400"
                                     }`}
                                   >
-                                    {bot.enabled ? "ONLINE" : "SUSPENDED"}
+                                    {bot.enabled ? "ONLINE" : "DISABLED"}
                                   </span>
                                   <span className="px-2 py-0.5 rounded-full text-[10px] font-mono uppercase bg-secondary text-foreground">
                                     {bot.plan || "free"}
@@ -652,63 +683,45 @@ export default function SuperAdminPage() {
                                 </div>
                               </td>
                               <td className="py-3 px-4">
-                                <div className="flex items-center gap-2">
-                                  <code className="font-mono text-[11px] bg-background px-2 py-1 rounded border border-border">
-                                    {revealed || bot.token_preview || "No token"}
-                                  </code>
-                                  {isFounder && bot.has_token && (
-                                    <>
-                                      {!revealed ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => revealTokenMutation.mutate(bot.id)}
-                                          disabled={revealTokenMutation.isPending}
-                                          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 border border-amber-500/30 text-[10px] font-semibold transition"
-                                          title="FOUNDER Only: Reveal raw token"
-                                        >
-                                          <Eye className="w-3 h-3" /> Reveal
-                                        </button>
-                                      ) : (
-                                        <>
-                                          <button
-                                            type="button"
-                                            onClick={() => {
-                                              navigator.clipboard.writeText(revealed);
-                                              setCopiedBotId(bot.id);
-                                              toast.success("Bot token copied");
-                                              setTimeout(() => setCopiedBotId(null), 2000);
-                                            }}
-                                            className="p-1 rounded bg-secondary hover:bg-accent text-foreground"
-                                            title="Copy token"
-                                          >
-                                            {copiedBotId === bot.id ? (
-                                              <Check className="w-3 h-3 text-emerald-400" />
-                                            ) : (
-                                              <Copy className="w-3 h-3" />
-                                            )}
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() =>
-                                              setRevealedTokens((prev) => {
-                                                const next = { ...prev };
-                                                delete next[bot.id];
-                                                return next;
-                                              })
-                                            }
-                                            className="p-1 rounded bg-secondary hover:bg-accent text-muted-foreground"
-                                            title="Hide token"
-                                          >
-                                            <EyeOff className="w-3 h-3" />
-                                          </button>
-                                        </>
-                                      )}
-                                    </>
+                                <div className="space-y-1.5">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <code className="font-mono text-[11px] bg-background px-2 py-1 rounded border border-border">
+                                      {bot.has_token
+                                        ? bot.token_preview || "Masked Token"
+                                        : "Token Wiped"}
+                                    </code>
+                                    <button
+                                      type="button"
+                                      onClick={() => validateTokenMutation.mutate(bot.id)}
+                                      disabled={validateTokenMutation.isPending}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-primary/15 hover:bg-primary/25 text-primary border border-primary/30 text-[10px] font-semibold transition"
+                                    >
+                                      <ShieldCheck className="w-3 h-3" />
+                                      1-Click Validate &amp; Inspect Token
+                                    </button>
+                                  </div>
+
+                                  {diag && (
+                                    <div
+                                      className={`p-2 rounded-lg border text-[10px] font-mono space-y-0.5 ${
+                                        diag.token_status === "VALID"
+                                          ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                                          : "bg-rose-500/10 border-rose-500/30 text-rose-300"
+                                      }`}
+                                    >
+                                      <div className="font-bold">
+                                        Status: {diag.token_status}
+                                      </div>
+                                      <div className="text-muted-foreground">
+                                        Bot: {diag.bot_username || "N/A"} ({diag.bot_id || "N/A"}) · Guilds:{" "}
+                                        {diag.approximate_guild_count} · Flags: {diag.flags}
+                                      </div>
+                                    </div>
                                   )}
                                 </div>
                               </td>
                               <td className="py-3 px-4 text-right">
-                                <div className="inline-flex items-center gap-1.5">
+                                <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
                                   <button
                                     type="button"
                                     onClick={() => setInspectingBot(bot)}
@@ -718,21 +731,52 @@ export default function SuperAdminPage() {
                                   </button>
 
                                   {isModOrAbove && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          suspendBotMutation.mutate({
+                                            botId: bot.id,
+                                            enabled: !bot.enabled,
+                                          })
+                                        }
+                                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
+                                          bot.enabled
+                                            ? "bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 border border-amber-500/30"
+                                            : "bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30"
+                                        }`}
+                                      >
+                                        {bot.enabled ? "Suspend" : "Resume"}
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        disabled={!bot.has_token || wipeTokenMutation.isPending}
+                                        onClick={() => wipeTokenMutation.mutate(bot.id)}
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 disabled:opacity-40 text-amber-400 border border-amber-500/30 text-[11px] font-semibold transition"
+                                        title="MODERATOR+: Clear stored token & disconnect bot"
+                                      >
+                                        <Eraser className="w-3 h-3" />
+                                        Wipe Token &amp; Disconnect
+                                      </button>
+                                    </>
+                                  )}
+
+                                  {isAdminOrAbove && (
                                     <button
                                       type="button"
+                                      disabled={blacklistBotMutation.isPending}
                                       onClick={() =>
-                                        suspendBotMutation.mutate({
+                                        blacklistBotMutation.mutate({
                                           botId: bot.id,
-                                          enabled: !bot.enabled,
+                                          reason: `Blacklisted by ${viewerRole} via Super Admin Token Vault`,
                                         })
                                       }
-                                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
-                                        bot.enabled
-                                          ? "bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 border border-amber-500/30"
-                                          : "bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30"
-                                      }`}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-400 border border-rose-500/30 text-[11px] font-semibold transition"
+                                      title="ADMIN & FOUNDER Only: Delete bot and permanently blacklist its Discord Application ID"
                                     >
-                                      {bot.enabled ? "Disconnect / Suspend" : "Re-Enable"}
+                                      <ShieldOff className="w-3 h-3" />
+                                      Wipe &amp; Blacklist Bot ID
                                     </button>
                                   )}
 
@@ -754,6 +798,46 @@ export default function SuperAdminPage() {
                       </tbody>
                     </table>
                   </div>
+
+                  {/* Blacklisted Application IDs Table */}
+                  {(overview?.blacklisted_applications || []).length > 0 && (
+                    <div className="rounded-2xl bg-card border border-rose-500/30 p-5 space-y-3">
+                      <h3 className="text-sm font-bold text-rose-400 flex items-center gap-2">
+                        <ShieldOff className="w-4 h-4" />
+                        Blacklisted Discord Application IDs ({overview?.blacklisted_applications?.length})
+                      </h3>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs font-mono">
+                          <thead>
+                            <tr className="border-b border-border text-muted-foreground font-sans">
+                              <th className="py-2 pr-4">Application ID</th>
+                              <th className="py-2 px-4">Reason</th>
+                              <th className="py-2 px-4">Blacklisted By</th>
+                              <th className="py-2 pl-4 text-right">Timestamp</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-border/60">
+                            {(overview?.blacklisted_applications || []).map((item) => (
+                              <tr key={item.application_id}>
+                                <td className="py-2 pr-4 text-rose-400 font-bold">
+                                  {item.application_id}
+                                </td>
+                                <td className="py-2 px-4 font-sans text-foreground">
+                                  {item.reason || "Trust & Safety Blacklist"}
+                                </td>
+                                <td className="py-2 px-4 text-muted-foreground">
+                                  {item.blacklisted_by}
+                                </td>
+                                <td className="py-2 pl-4 text-right text-muted-foreground">
+                                  {new Date(item.created_at).toLocaleString()}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
 
                   {inspectingBot && (
                     <div className="rounded-2xl bg-card border border-border p-5 space-y-3">

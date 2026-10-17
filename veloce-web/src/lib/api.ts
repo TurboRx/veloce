@@ -244,6 +244,23 @@ export interface StaffAuditLogRecord {
   created_at: string;
 }
 
+export interface BlacklistedApplicationRecord {
+  application_id: string;
+  reason?: string | null;
+  blacklisted_by: string;
+  created_at: string;
+}
+
+export interface TokenValidationResult {
+  bot_db_id: string;
+  token_status: "VALID" | "REVOKED_OR_INVALID";
+  bot_username: string | null;
+  bot_id: string | null;
+  avatar: string | null;
+  approximate_guild_count: number;
+  flags: number;
+}
+
 export interface AdminOverviewResponse {
   viewer: User;
   founder_discord_id: string;
@@ -251,6 +268,7 @@ export interface AdminOverviewResponse {
   bots: AdminBotRecord[];
   abuse_radar: AdminAbuseItem[];
   audit_logs: StaffAuditLogRecord[];
+  blacklisted_applications?: BlacklistedApplicationRecord[];
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -414,11 +432,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),
-  revealBotToken: (botId: string) =>
-    request<{ bot_id: string; bot_name: string; discord_id: string; bot_token: string | null }>(
-      `/api/admin/bots/${botId}/reveal-token`,
-      { method: "POST" }
-    ),
+  validateBotToken: (botId: string) =>
+    request<TokenValidationResult>(`/api/admin/bots/${botId}/validate-token`, {
+      method: "POST",
+    }),
+  wipeBotToken: (botId: string) =>
+    request<{ success: boolean; bot: App }>(`/api/admin/bots/${botId}/wipe-token`, {
+      method: "POST",
+    }),
+  blacklistAdminBot: (botId: string, reason?: string) =>
+    request<{
+      success: boolean;
+      deleted_bot_id: string;
+      blacklisted_application_id: string;
+    }>(`/api/admin/bots/${botId}/blacklist`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
   purgeAdminBot: (botId: string) =>
     request<{ success: boolean; deleted_bot_id: string }>(`/api/admin/bots/${botId}`, {
       method: "DELETE",
@@ -436,7 +466,7 @@ export const api = {
       body: JSON.stringify(data),
     }),
   emergencyBanAndPurge: (discordId: string, reason?: string) =>
-    request<{ success: boolean; discord_id: string; purged_bots_count: number }>(
+    request<{ success: boolean; banned_discord_id: string; purged_bots: number }>(
       "/api/admin/abuse/ban-and-purge",
       {
         method: "POST",

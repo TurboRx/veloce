@@ -204,6 +204,16 @@ async function ensureSchema(sql: any) {
       )
     `;
 
+    // Blacklisted Discord Bot Application IDs table
+    await sql`
+      CREATE TABLE IF NOT EXISTS blacklisted_applications (
+        application_id TEXT PRIMARY KEY,
+        reason TEXT,
+        blacklisted_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
     schemaMigrated = true;
   } catch (err) {
     console.error("ensureSchema error", err);
@@ -1263,7 +1273,7 @@ async function handleCreateUserBot(c: any) {
     });
     if (res.ok) {
       const data: any = await res.json();
-      discordId = data.id;
+      discordId = String(data.id || "").trim();
       if (!customName) botUsername = data.username;
       botAvatar = data.avatar || null;
     } else {
@@ -1274,6 +1284,28 @@ async function handleCreateUserBot(c: any) {
     }
   } catch (err) {
     console.error("Failed to fetch Discord bot user", err);
+  }
+
+  // Enforce Blacklisted Discord Application ID Guard
+  if (discordId && discordId !== "000000000000000000") {
+    const blacklistedRows = await sql`
+      SELECT application_id, reason
+      FROM blacklisted_applications
+      WHERE application_id = ${discordId}
+      LIMIT 1
+    `.catch(() => []);
+    if (blacklistedRows && blacklistedRows.length > 0) {
+      return c.json(
+        {
+          code: "BOT_APPLICATION_BLACKLISTED",
+          error:
+            "This Discord Application ID has been blacklisted by Veloce Trust & Safety and cannot be connected.",
+          message:
+            "This Discord Application ID has been blacklisted by Veloce Trust & Safety and cannot be connected.",
+        },
+        403
+      );
+    }
   }
 
   const appId = "app_" + crypto.randomUUID().replace(/-/g, "").substring(0, 16);
@@ -1331,6 +1363,35 @@ async function handleUpdateUserBot(c: any) {
   const existing = await getOwnedBotOrNull(sql, id, authUser);
   if (!existing) return c.json({ error: "Bot not found" }, 404);
 
+  // If rotating/updating the bot token, verify the application_id is not blacklisted
+  if (body.token && typeof body.token === "string" && body.token.trim()) {
+    const newToken = body.token.trim();
+    const res = await fetch("https://discord.com/api/v10/users/@me", {
+      headers: { Authorization: `Bot ${newToken}` },
+    }).catch(() => null);
+    if (!res || !res.ok) {
+      return c.json(
+        { error: "Invalid Discord Bot Token. Please verify the token in the Discord Developer Portal." },
+        400
+      );
+    }
+    const tokenBot: any = await res.json();
+    const candidateAppId = String(tokenBot.id || existing.discord_id || "").trim();
+    const blacklistedRows = await sql`
+      SELECT application_id FROM blacklisted_applications WHERE application_id = ${candidateAppId} LIMIT 1
+    `.catch(() => []);
+    if (blacklistedRows && blacklistedRows.length > 0) {
+      return c.json(
+        {
+          code: "BOT_APPLICATION_BLACKLISTED",
+          error:
+            "This Discord Application ID has been blacklisted by Veloce Trust & Safety and cannot be connected.",
+        },
+        403
+      );
+    }
+  }
+
   // Anti-Privilege-Escalation Guard: Never allow client PATCH to upgrade plan, role, or extra_bot_slots
   const currentPlan = existing.plan || "free";
   const canUseCustomBranding = currentPlan === "pro" || currentPlan === "studio";
@@ -1352,7 +1413,7 @@ async function handleUpdateUserBot(c: any) {
       description = COALESCE(${body.description ?? null}, description),
       enabled = COALESCE(${body.enabled ?? null}, enabled),
       discord_public_key = CASE WHEN ${body.public_key !== undefined} THEN ${body.public_key || null} ELSE discord_public_key END,
-      discord_token = CASE WHEN ${body.token !== undefined && !!body.token} THEN ${body.token} ELSE discord_token END,
+      discord_token = CASE WHEN ${body.token !== undefined && !!body.token} THEN ${body.token.trim()} ELSE discord_token END,
       custom_branding = ${nextCustomBranding},
       discord_status = CASE WHEN ${body.discord_status !== undefined} THEN ${JSON.stringify(body.discord_status)}::jsonb ELSE discord_status END,
       updated_at = NOW()
@@ -1738,46 +1799,93 @@ app.get("/api/admin/overview", async (c) => {
   if ("errorResponse" in check) return check.errorResponse;
   const staff = check.user;
 
-  const [usersList, botsList, recentRateLimits, spikeBots, auditLogs] = await Promise.all([
+  const [usersList, botsList, spikeBots, auditLogs, blacklistedApps] = await Promise.all([
     sql`
-      SELECT id, email, display_name, discord_id, discord_username, discord_avatar, role, plan, COALESCE(extra_bot_slots, 0) AS extra_bot_slots, COALESCE(is_banned, false) AS is_banned, ban_reason, created_at, updated_at
-      FROM users
+      SELECT
+        u.id,
+        u.email,
+        u.display_name,
+        u.discord_id,
+        u.discord_username,
+        u.discord_avatar,
+        u.role,
+        u.plan,
+        COALESCE(u.extra_bot_slots, 0) AS extra_bot_slots,
+        COALESCE(u.is_banned, false) AS is_banned,
+        u.ban_reason,
+        u.created_at,
+        u.updated_at,
+        (
+          SELECT COUNT(*)::int
+          FROM apps a
+          WHERE a.user_id = u.discord_id OR a.owner_user_id = u.id
+        ) AS bot_count
+      FROM users u
       ORDER BY
-        CASE role
+        CASE u.role
           WHEN 'FOUNDER' THEN 5
           WHEN 'ADMIN' THEN 4
           WHEN 'MODERATOR' THEN 3
           WHEN 'SUPPORT' THEN 2
           ELSE 1
         END DESC,
-        created_at DESC
+        u.created_at DESC
       LIMIT 200
     `.catch(() => []),
     sql`
-      SELECT id, user_id, owner_user_id, name, description, enabled, discord_id, discord_avatar, discord_token, plan, custom_branding, subscription_status, created_at, updated_at
-      FROM apps
-      ORDER BY created_at DESC
-      LIMIT 200
-    `.catch(() => []),
-    sql`
-      SELECT l.id, l.app_id, l.user_id, l.message, l.level, l.details, l.created_at, a.name AS bot_name, a.discord_id AS bot_discord_id, a.user_id AS owner_discord_id
-      FROM logs l
-      LEFT JOIN apps a ON a.id = l.app_id
-      WHERE l.level = 'error' OR l.message ILIKE '%429%' OR l.message ILIKE '%rate limit%'
-      ORDER BY l.created_at DESC
-      LIMIT 50
-    `.catch(() => []),
-    sql`
-      SELECT a.id AS app_id, a.name AS bot_name, a.user_id AS owner_discord_id, a.owner_user_id, a.enabled, COUNT(l.id)::int AS recent_events
+      SELECT
+        a.id,
+        a.user_id,
+        a.owner_user_id,
+        u.discord_username AS owner_username,
+        u.display_name AS owner_display_name,
+        a.name,
+        a.description,
+        a.enabled,
+        a.discord_id,
+        a.discord_avatar,
+        a.discord_token,
+        a.plan,
+        a.custom_branding,
+        a.subscription_status,
+        a.created_at,
+        a.updated_at,
+        (SELECT COUNT(*)::int FROM commands c WHERE c.app_id = a.id) AS command_count,
+        (SELECT COUNT(*)::int FROM logs l WHERE l.app_id = a.id AND l.level = 'error') AS error_count
       FROM apps a
-      LEFT JOIN logs l ON l.app_id = a.id AND l.created_at > NOW() - INTERVAL '1 hour'
-      GROUP BY a.id, a.name, a.user_id, a.owner_user_id, a.enabled
-      ORDER BY recent_events DESC
-      LIMIT 25
+      LEFT JOIN users u ON u.discord_id = a.user_id OR u.id = a.owner_user_id
+      ORDER BY a.created_at DESC
+      LIMIT 200
+    `.catch(() => []),
+    sql`
+      SELECT
+        a.id AS app_id,
+        a.name AS bot_name,
+        a.discord_id AS bot_discord_id,
+        a.enabled,
+        COALESCE(a.user_id, REPLACE(a.owner_user_id, 'usr_', '')) AS owner_discord_id,
+        u.discord_username AS owner_username,
+        COALESCE(u.is_banned, false) AS owner_banned,
+        COUNT(l.id)::int AS total_events_1h,
+        COUNT(l.id) FILTER (WHERE l.message ILIKE '%429%' OR l.message ILIKE '%rate limit%')::int AS rate_limit_429_count,
+        COUNT(l.id) FILTER (WHERE l.level = 'error')::int AS error_count,
+        COALESCE(MAX(l.created_at), a.updated_at) AS last_activity_at
+      FROM apps a
+      LEFT JOIN users u ON u.discord_id = a.user_id OR u.id = a.owner_user_id
+      LEFT JOIN logs l ON l.app_id = a.id AND l.created_at > NOW() - INTERVAL '24 hours'
+      GROUP BY a.id, a.name, a.discord_id, a.enabled, a.user_id, a.owner_user_id, u.discord_username, u.is_banned, a.updated_at
+      ORDER BY rate_limit_429_count DESC, total_events_1h DESC
+      LIMIT 50
     `.catch(() => []),
     sql`
       SELECT id, actor_discord_id, actor_username, actor_role, target_id, action_type, details, ip_address, created_at
       FROM staff_audit_logs
+      ORDER BY created_at DESC
+      LIMIT 100
+    `.catch(() => []),
+    sql`
+      SELECT application_id, reason, blacklisted_by, created_at
+      FROM blacklisted_applications
       ORDER BY created_at DESC
       LIMIT 100
     `.catch(() => []),
@@ -1788,27 +1896,25 @@ app.get("/api/admin/overview", async (c) => {
     ...u,
     role: String(u.discord_id) === founderId ? "FOUNDER" : normalizeStaffRole(u.role),
     extra_bot_slots: Math.max(0, Number(u.extra_bot_slots || 0)),
+    bot_count: Number(u.bot_count || 0),
     is_banned: String(u.discord_id) === founderId ? false : Boolean(u.is_banned),
   }));
 
-  const sanitizedBots = (botsList || []).map((b: any) => sanitizeBotForClient(b));
+  const sanitizedBots = (botsList || []).map((b: any) => ({
+    ...sanitizeBotForClient(b),
+    command_count: Number(b.command_count || 0),
+    error_count: Number(b.error_count || 0),
+  }));
 
   return c.json({
+    viewer: staff,
     staff_user: staff,
     founder_discord_id: founderId,
-    stats: {
-      total_users: normalizedUsers.length,
-      total_bots: sanitizedBots.length,
-      active_bots: sanitizedBots.filter((b: any) => b.enabled).length,
-      rate_limit_alerts: (recentRateLimits || []).length,
-    },
     users: normalizedUsers,
     bots: sanitizedBots,
-    abuse_radar: {
-      rate_limit_logs: recentRateLimits || [],
-      high_activity_bots: spikeBots || [],
-    },
+    abuse_radar: spikeBots || [],
     audit_logs: auditLogs || [],
+    blacklisted_applications: blacklistedApps || [],
   });
 });
 
@@ -1950,18 +2056,19 @@ app.post("/api/admin/bots/:id/suspend", async (c) => {
   });
 });
 
-// 5. Token Vault: Reveal Raw Bot Token (FOUNDER ONLY)
-app.post("/api/admin/bots/:id/reveal-token", async (c) => {
+// 5. Token Vault: 1-Click Validate & Inspect Token (SUPPORT, MODERATOR, ADMIN, FOUNDER)
+// Strictly write-only token hygiene: NEVER sends the raw bot_token to the browser.
+app.post("/api/admin/bots/:id/validate-token", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
 
-  const check = await requireStaffRole(c, sql, "FOUNDER");
+  const check = await requireStaffRole(c, sql, "SUPPORT");
   if ("errorResponse" in check) return check.errorResponse;
-  const founder = check.user;
+  const staff = check.user;
 
   const botId = c.req.param("id");
   const rows = await sql`
-    SELECT id, name, discord_id, user_id, owner_user_id, discord_token
+    SELECT id, name, discord_id, discord_avatar, user_id, owner_user_id, discord_token
     FROM apps
     WHERE id = ${botId}
     LIMIT 1
@@ -1970,28 +2077,240 @@ app.post("/api/admin/bots/:id/reveal-token", async (c) => {
     return c.json({ error: "Bot not found" }, 404);
   }
   const bot = rows[0];
+  const rawToken = bot.discord_token ? String(bot.discord_token).trim() : "";
+
+  if (!rawToken) {
+    await writeStaffAuditLog(
+      sql,
+      staff,
+      botId,
+      "VALIDATE_BOT_TOKEN",
+      { bot_name: bot.name, token_status: "REVOKED_OR_INVALID", reason: "No token stored" },
+      getClientIp(c)
+    );
+    return c.json({
+      bot_db_id: bot.id,
+      token_status: "REVOKED_OR_INVALID" as const,
+      bot_username: bot.name || null,
+      bot_id: bot.discord_id || null,
+      avatar: bot.discord_avatar || null,
+      approximate_guild_count: 0,
+      flags: 0,
+    });
+  }
+
+  let tokenStatus: "VALID" | "REVOKED_OR_INVALID" = "REVOKED_OR_INVALID";
+  let botUsername: string | null = bot.name || null;
+  let discordBotId: string | null = bot.discord_id || null;
+  let avatar: string | null = bot.discord_avatar || null;
+  let approximateGuildCount: number | null = null;
+  let flags: number | null = null;
+
+  try {
+    const [userRes, appRes] = await Promise.all([
+      fetch("https://discord.com/api/v10/users/@me", {
+        headers: { Authorization: `Bot ${rawToken}` },
+      }),
+      fetch("https://discord.com/api/v10/applications/@me", {
+        headers: { Authorization: `Bot ${rawToken}` },
+      }),
+    ]);
+
+    if (userRes.ok) {
+      tokenStatus = "VALID";
+      const userData: any = await userRes.json();
+      botUsername = userData.username || botUsername;
+      discordBotId = userData.id || discordBotId;
+      avatar = userData.avatar ?? avatar;
+      if (typeof userData.flags === "number") {
+        flags = userData.flags;
+      }
+    } else if (userRes.status === 401) {
+      tokenStatus = "REVOKED_OR_INVALID";
+    }
+
+    if (appRes.ok) {
+      tokenStatus = "VALID";
+      const appData: any = await appRes.json();
+      if (typeof appData.approximate_guild_count === "number") {
+        approximateGuildCount = appData.approximate_guild_count;
+      }
+      if (typeof appData.flags === "number") {
+        flags = appData.flags;
+      }
+      if (!discordBotId && appData.id) {
+        discordBotId = appData.id;
+      }
+    }
+  } catch (err) {
+    console.error("Failed to validate Discord bot token against Discord API", err);
+  }
 
   await writeStaffAuditLog(
     sql,
-    founder,
+    staff,
     botId,
-    "REVEAL_BOT_TOKEN",
+    "VALIDATE_BOT_TOKEN",
     {
-      bot_name: bot.name,
-      bot_discord_id: bot.discord_id,
-      owner_discord_id: bot.user_id || String(bot.owner_user_id || "").replace(/^usr_/, ""),
+      bot_name: botUsername,
+      bot_discord_id: discordBotId,
+      token_status: tokenStatus,
+      approximate_guild_count: approximateGuildCount,
+      flags,
     },
     getClientIp(c)
   );
 
   return c.json({
-    bot_id: bot.id,
-    bot_name: bot.name,
-    discord_token: bot.discord_token || "",
+    bot_db_id: bot.id,
+    token_status: tokenStatus,
+    bot_username: botUsername,
+    bot_id: discordBotId,
+    avatar,
+    approximate_guild_count: approximateGuildCount ?? 0,
+    flags: flags ?? 0,
   });
 });
 
-// 6. Permanently Purge Bot (FOUNDER ONLY)
+// 6. Token Vault: 1-Click Wipe Token & Disconnect (MODERATOR, ADMIN, FOUNDER)
+app.post("/api/admin/bots/:id/wipe-token", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const check = await requireStaffRole(c, sql, "MODERATOR");
+  if ("errorResponse" in check) return check.errorResponse;
+  const staff = check.user;
+
+  const botId = c.req.param("id");
+  const existingRows = await sql`
+    SELECT id, user_id, owner_user_id, name, discord_id, discord_token
+    FROM apps
+    WHERE id = ${botId}
+    LIMIT 1
+  `;
+  if (!existingRows || existingRows.length === 0) {
+    return c.json({ error: "Bot not found" }, 404);
+  }
+  const bot = existingRows[0];
+
+  const founderId = (c.env.FOUNDER_DISCORD_ID || DEFAULT_FOUNDER_DISCORD_ID).trim();
+  const botOwnerDiscordId =
+    bot.user_id || String(bot.owner_user_id || "").replace(/^usr_/, "");
+  if (botOwnerDiscordId === founderId && staff.role !== "FOUNDER") {
+    return c.json({ error: "Forbidden: Cannot wipe tokens on bots owned by the Founder" }, 403);
+  }
+
+  disconnectBotGatewayImmediate(botId);
+  if (bot.discord_token) {
+    c.executionCtx.waitUntil(
+      forceDiscordBotOfflineAndClearCommands(bot.discord_id, bot.discord_token)
+    );
+  }
+
+  const updated = await sql`
+    UPDATE apps
+    SET discord_token = NULL, enabled = false, updated_at = NOW()
+    WHERE id = ${botId}
+    RETURNING id, user_id, owner_user_id, name, description, enabled, discord_id, discord_avatar, discord_token, plan, custom_branding, created_at, updated_at
+  `;
+
+  await writeStaffAuditLog(
+    sql,
+    staff,
+    botId,
+    "WIPE_BOT_TOKEN",
+    {
+      bot_name: bot.name,
+      bot_discord_id: bot.discord_id,
+      owner_discord_id: botOwnerDiscordId,
+    },
+    getClientIp(c)
+  );
+
+  return c.json({
+    success: true,
+    bot: sanitizeBotForClient(updated[0]),
+  });
+});
+
+// 7. Token Vault: 1-Click Wipe & Blacklist Bot Application ID (ADMIN & FOUNDER ONLY)
+app.post("/api/admin/bots/:id/blacklist", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+
+  const check = await requireStaffRole(c, sql, "ADMIN");
+  if ("errorResponse" in check) return check.errorResponse;
+  const staff = check.user;
+
+  const botId = c.req.param("id");
+  const body = await c.req.json().catch(() => ({}));
+  const reason = String(body.reason || "Blacklisted via Super Admin Token Vault").trim();
+
+  const existingRows = await sql`
+    SELECT id, user_id, owner_user_id, name, discord_id, discord_token
+    FROM apps
+    WHERE id = ${botId}
+    LIMIT 1
+  `;
+  if (!existingRows || existingRows.length === 0) {
+    return c.json({ error: "Bot not found" }, 404);
+  }
+  const bot = existingRows[0];
+
+  const founderId = (c.env.FOUNDER_DISCORD_ID || DEFAULT_FOUNDER_DISCORD_ID).trim();
+  const botOwnerDiscordId =
+    bot.user_id || String(bot.owner_user_id || "").replace(/^usr_/, "");
+  if (botOwnerDiscordId === founderId && staff.role !== "FOUNDER") {
+    return c.json({ error: "Forbidden: Cannot blacklist bots owned by the Founder" }, 403);
+  }
+
+  const applicationId = String(bot.discord_id || "").trim();
+  if (applicationId && applicationId !== "000000000000000000") {
+    await sql`
+      INSERT INTO blacklisted_applications (application_id, reason, blacklisted_by, created_at)
+      VALUES (${applicationId}, ${reason}, ${staff.discord_id}, NOW())
+      ON CONFLICT (application_id) DO UPDATE SET
+        reason = EXCLUDED.reason,
+        blacklisted_by = EXCLUDED.blacklisted_by,
+        created_at = NOW()
+    `;
+  }
+
+  disconnectBotGatewayImmediate(botId);
+  await sql`DELETE FROM commands WHERE app_id = ${botId}`.catch(() => {});
+  await sql`DELETE FROM event_listeners WHERE app_id = ${botId}`.catch(() => {});
+  await sql`DELETE FROM logs WHERE app_id = ${botId}`.catch(() => {});
+  await sql`DELETE FROM apps WHERE id = ${botId}`;
+
+  if (bot.discord_token) {
+    c.executionCtx.waitUntil(
+      forceDiscordBotOfflineAndClearCommands(bot.discord_id, bot.discord_token)
+    );
+  }
+
+  await writeStaffAuditLog(
+    sql,
+    staff,
+    applicationId || botId,
+    "WIPE_AND_BLACKLIST_BOT_ID",
+    {
+      bot_db_id: botId,
+      bot_name: bot.name,
+      application_id: applicationId,
+      owner_discord_id: botOwnerDiscordId,
+      reason,
+    },
+    getClientIp(c)
+  );
+
+  return c.json({
+    success: true,
+    deleted_bot_id: botId,
+    blacklisted_application_id: applicationId,
+  });
+});
+
+// 8. Permanently Purge Bot (FOUNDER ONLY)
 app.delete("/api/admin/bots/:id", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
@@ -2035,7 +2354,7 @@ app.delete("/api/admin/bots/:id", async (c) => {
     getClientIp(c)
   );
 
-  return c.json({ success: true });
+  return c.json({ success: true, deleted_bot_id: botId });
 });
 
 // 7. User Directory & Plan Override / Ban Manager (ADMIN & FOUNDER)
