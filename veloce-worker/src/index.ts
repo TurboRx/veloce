@@ -1025,8 +1025,16 @@ async function handleDiscordOAuthCallback(c: any) {
     isSecure ? "Secure; " : ""
   }SameSite=Lax; Max-Age=0`;
 
+  const cleanPath = verifiedState.redirect.startsWith("/")
+    ? verifiedState.redirect
+    : `/${verifiedState.redirect}`;
+  const finalRedirectUrl = verifiedState.redirect.startsWith("http")
+    ? verifiedState.redirect
+    : `${origin}${cleanPath}`;
+
   const headers = new Headers();
-  headers.set("Location", verifiedState.redirect);
+  headers.set("Location", finalRedirectUrl);
+  headers.set("Cache-Control", "private, no-cache, no-store, must-revalidate");
   headers.append("Set-Cookie", sessionCookie);
   headers.append("Set-Cookie", clearStateCookie);
 
