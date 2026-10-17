@@ -14,7 +14,7 @@ export default function App({ Component, pageProps }: AppProps) {
       attribute="class"
       defaultTheme="system"
       enableSystem
-      themes={["light", "dark", "discord"]}
+      themes={["light", "dark"]}
     >
       <QueryClientProvider client={queryClient}>
         <Component {...pageProps} />

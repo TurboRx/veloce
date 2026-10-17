@@ -130,12 +130,12 @@ const PRICING_PLANS = [
   },
   {
     name: "Pro",
-    price: "$5",
+    price: "$5.99",
     period: "per month",
     description: "For growing Discord communities and creators who want unlimited power.",
     badge: "Most Popular",
     highlighted: true,
-    ctaLabel: "Start Pro Trial",
+    ctaLabel: "Upgrade to Pro",
     features: [
       "Up to 10 Custom Discord Bots",
       "Unlimited Slash Commands & Events",
@@ -147,7 +147,7 @@ const PRICING_PLANS = [
   },
   {
     name: "Studio",
-    price: "$15",
+    price: "$14.99",
     period: "per month",
     description: "Built for multi-server networks, agencies, and power builders.",
     badge: "Unlimited",
@@ -156,9 +156,9 @@ const PRICING_PLANS = [
     features: [
       "Unlimited Discord Bots & Servers",
       "Unlimited Commands, Events & Runs",
+      "Custom Branding & White-Labeling",
       "Priority Edge Execution",
       "90-Day Audit Logs & Telemetry",
-      "Early Access to New Flow Blocks",
       "Dedicated Onboarding Support",
     ],
   },
@@ -622,8 +622,8 @@ export default function Home() {
                   Start Free, Upgrade as Your Server Grows
                 </h2>
                 <p className="text-sm sm:text-base text-muted-foreground mt-3">
-                  Launch your bot for free today. Unlock unlimited commands, custom branding, and
-                  multiple bots whenever you&apos;re ready.
+                  Every bot starts on the free plan. Upgrade a single bot when it needs higher
+                  limits, and cancel any time.
                 </p>
               </div>
 

@@ -15,6 +15,7 @@ import {
   Server,
   Zap,
   MoreVertical,
+  UserPlus,
 } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -41,6 +42,7 @@ import { ThemeSwitch } from "@/components/common/ThemeSwitch";
 import { useCurrentUser } from "@/lib/useAuth";
 import {
   api,
+  getAppInviteUrl,
   App,
   Command,
   EventListener,
@@ -770,6 +772,19 @@ function BuilderContent() {
               </div>
             )}
 
+            {apps?.find((a) => a.id === selectedAppId)?.discord_id && (
+              <a
+                href={getAppInviteUrl(apps.find((a) => a.id === selectedAppId)!.discord_id, "guild")}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition shadow-sm"
+                title="Invite bot to a Discord server"
+              >
+                <UserPlus className="w-3.5 h-3.5 text-indigo-400" />
+                Invite
+              </a>
+            )}
+
             <button
               onClick={() => setGuildsModalOpen(true)}
               disabled={!selectedAppId}
@@ -893,6 +908,18 @@ function BuilderContent() {
 
                 {mobileMenuOpen && (
                   <div className="absolute right-0 top-full mt-1 w-44 rounded-xl bg-slate-900 border border-slate-800 p-1.5 shadow-2xl z-50 flex flex-col gap-1">
+                    {apps?.find((a) => a.id === selectedAppId)?.discord_id && (
+                      <a
+                        href={getAppInviteUrl(apps.find((a) => a.id === selectedAppId)!.discord_id, "guild")}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={() => setMobileMenuOpen(false)}
+                        className="w-full px-2.5 py-1.5 text-left text-xs text-slate-300 hover:bg-slate-800 rounded-lg flex items-center gap-2"
+                      >
+                        <UserPlus className="w-3.5 h-3.5 text-indigo-400" />
+                        <span>Invite Bot</span>
+                      </a>
+                    )}
                     <button
                       type="button"
                       onClick={() => {

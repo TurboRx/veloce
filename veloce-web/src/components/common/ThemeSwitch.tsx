@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import { useTheme } from "next-themes";
-import { Sun, Moon, Monitor, Check } from "lucide-react";
+import { Sun, Moon, Laptop, Check } from "lucide-react";
 
 export function DiscordLogo({ className = "w-4 h-4" }: { className?: string }) {
   return (
@@ -31,12 +31,11 @@ export function GitHubLogo({ className = "w-4 h-4" }: { className?: string }) {
 const THEMES = [
   { id: "light", label: "Light", icon: Sun },
   { id: "dark", label: "Dark", icon: Moon },
-  { id: "discord", label: "Discord", icon: DiscordLogo },
-  { id: "system", label: "System", icon: Monitor },
+  { id: "system", label: "System", icon: Laptop },
 ] as const;
 
 export function ThemeSwitch() {
-  const { theme, setTheme, resolvedTheme } = useTheme();
+  const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -64,9 +63,9 @@ export function ThemeSwitch() {
   }
 
   const ActiveIcon =
-    theme === "discord"
-      ? DiscordLogo
-      : resolvedTheme === "light"
+    !theme || theme === "system"
+      ? Laptop
+      : theme === "light"
       ? Sun
       : Moon;
 
@@ -86,7 +85,7 @@ export function ThemeSwitch() {
         <div className="absolute right-0 mt-2 w-36 rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-xl z-50 animate-in fade-in zoom-in-95 duration-100">
           {THEMES.map((item) => {
             const Icon = item.icon;
-            const isSelected = theme === item.id;
+            const isSelected = (theme || "system") === item.id;
             return (
               <button
                 key={item.id}

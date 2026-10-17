@@ -19,7 +19,15 @@ export function getLoginUrl(redirect = "/apps"): string {
 
 export const loginUrl = getLoginUrl("/apps");
 
-
+export function getAppInviteUrl(
+  discordId: string,
+  type: "guild" | "user" = "guild"
+): string {
+  if (type === "user") {
+    return `https://discord.com/oauth2/authorize?client_id=${discordId}&integration_type=1&scope=applications.commands`;
+  }
+  return `https://discord.com/oauth2/authorize?client_id=${discordId}&integration_type=0&scope=bot%20applications.commands&permissions=8`;
+}
 
 export interface User {
   id: string;
@@ -31,6 +39,12 @@ export interface User {
   created_at: string;
 }
 
+export interface AppDiscordStatus {
+  status?: "online" | "idle" | "dnd" | "invisible";
+  activity_type?: number;
+  activity_name?: string;
+}
+
 export interface App {
   id: string;
   owner_user_id: string;
@@ -40,6 +54,9 @@ export interface App {
   discord_id: string;
   discord_public_key?: string;
   discord_avatar?: string;
+  plan?: "free" | "pro" | "studio";
+  custom_branding?: boolean;
+  discord_status?: AppDiscordStatus;
   created_at: string;
   updated_at: string;
 }
@@ -186,8 +203,19 @@ export const api = {
   getApp: (id: string) => request<App>(`/v1/apps/${id}`),
   createApp: (data: { token: string; name?: string; public_key?: string }) =>
     request<App>("/v1/apps", { method: "POST", body: JSON.stringify(data) }),
-  updateApp: (id: string, data: { name?: string; description?: string; enabled?: boolean; public_key?: string }) =>
-    request<App>(`/v1/apps/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  updateApp: (
+    id: string,
+    data: {
+      name?: string;
+      description?: string;
+      enabled?: boolean;
+      public_key?: string;
+      token?: string;
+      plan?: "free" | "pro" | "studio";
+      custom_branding?: boolean;
+      discord_status?: AppDiscordStatus;
+    }
+  ) => request<App>(`/v1/apps/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   deleteApp: (id: string) => request<{ success: boolean }>(`/v1/apps/${id}`, { method: "DELETE" }),
 
 
