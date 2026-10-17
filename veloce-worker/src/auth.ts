@@ -114,12 +114,10 @@ export async function resolveSessionSecret(
  */
 export async function resolveDiscordOAuthCredentials(
   sql: any,
-  env: { DISCORD_CLIENT_ID?: string; DISCORD_CLIENT_SECRET?: string },
-  pagesEnvHeaders?: { clientId?: string | null; clientSecret?: string | null }
+  env: { DISCORD_CLIENT_ID?: string; DISCORD_CLIENT_SECRET?: string }
 ): Promise<{ clientId: string | null; clientSecret: string | null }> {
-  let clientId = env.DISCORD_CLIENT_ID?.trim() || pagesEnvHeaders?.clientId?.trim() || null;
-  let clientSecret =
-    env.DISCORD_CLIENT_SECRET?.trim() || pagesEnvHeaders?.clientSecret?.trim() || null;
+  let clientId = env.DISCORD_CLIENT_ID?.trim() || null;
+  let clientSecret = env.DISCORD_CLIENT_SECRET?.trim() || null;
 
   if (!clientId || !clientSecret) {
     const rows = await sql`

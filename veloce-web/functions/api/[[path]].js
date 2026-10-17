@@ -20,13 +20,6 @@ export async function onRequest(context) {
   headers.set("x-forwarded-host", url.host);
   headers.set("x-forwarded-proto", url.protocol.replace(":", ""));
 
-  if (context.env.DISCORD_CLIENT_ID) {
-    headers.set("x-cloudflare-pages-oauth-id", context.env.DISCORD_CLIENT_ID);
-  }
-  if (context.env.DISCORD_CLIENT_SECRET) {
-    headers.set("x-cloudflare-pages-oauth-secret", context.env.DISCORD_CLIENT_SECRET);
-  }
-
   const init = {
     method: context.request.method,
     headers,

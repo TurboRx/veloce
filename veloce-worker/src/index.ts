@@ -843,10 +843,7 @@ async function handleDiscordOAuthStart(c: any) {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
 
-  const { clientId, clientSecret } = await resolveDiscordOAuthCredentials(sql, c.env, {
-    clientId: c.req.header("x-cloudflare-pages-oauth-id"),
-    clientSecret: c.req.header("x-cloudflare-pages-oauth-secret"),
-  });
+  const { clientId, clientSecret } = await resolveDiscordOAuthCredentials(sql, c.env);
   if (!clientId || !clientSecret) {
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -930,10 +927,7 @@ async function handleDiscordOAuthCallback(c: any) {
     );
   }
 
-  const { clientId, clientSecret } = await resolveDiscordOAuthCredentials(sql, c.env, {
-    clientId: c.req.header("x-cloudflare-pages-oauth-id"),
-    clientSecret: c.req.header("x-cloudflare-pages-oauth-secret"),
-  });
+  const { clientId, clientSecret } = await resolveDiscordOAuthCredentials(sql, c.env);
   if (!clientId || !clientSecret) {
     return c.json({ error: "Discord OAuth2 credentials are not configured" }, 503);
   }
