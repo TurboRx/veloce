@@ -37,6 +37,7 @@ import { FlowMobileInspectorModal } from "@/components/flow/FlowMobileInspectorM
 import { ExecutionLogsModal } from "@/components/telemetry/ExecutionLogsModal";
 import { GuildsModal } from "@/components/telemetry/GuildsModal";
 import { AuthBarrier } from "@/components/auth/AuthBarrier";
+import { ThemeSwitch } from "@/components/common/ThemeSwitch";
 import { useCurrentUser } from "@/lib/useAuth";
 import {
   api,
@@ -821,6 +822,8 @@ function BuilderContent() {
               )}
               Deploy
             </button>
+
+            <ThemeSwitch />
           </div>
         </header>
 
@@ -848,6 +851,8 @@ function BuilderContent() {
             </div>
 
             <div className="flex items-center gap-1.5 flex-shrink-0">
+              <ThemeSwitch />
+
               <button
                 onClick={() => saveMutation.mutate()}
                 disabled={

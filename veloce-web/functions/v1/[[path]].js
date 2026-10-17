@@ -1,13 +1,7 @@
 export async function onRequest(context) {
   const url = new URL(context.request.url);
-
-  if (url.pathname === "/v1/auth/login") {
-    const redirect = url.searchParams.get("redirect") || "/apps";
-    const target = redirect.startsWith("/") ? `${url.origin}${redirect}` : redirect;
-    return Response.redirect(target, 302);
-  }
-
   const upstreamBase = context.env.API_UPSTREAM_URL;
+
   if (!upstreamBase) {
     return new Response(
       JSON.stringify({ error: "API_UPSTREAM_URL environment variable is not configured" }),
@@ -21,6 +15,8 @@ export async function onRequest(context) {
   const targetUrl = `${upstreamBase.replace(/\/$/, "")}${url.pathname}${url.search}`;
   const headers = new Headers(context.request.headers);
   headers.delete("host");
+  headers.set("x-forwarded-host", url.host);
+  headers.set("x-forwarded-proto", url.protocol.replace(":", ""));
 
   const init = {
     method: context.request.method,

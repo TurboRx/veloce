@@ -4,31 +4,160 @@
 
 @layer base {
   :root {
-    --background: 222 47% 11%;
+    --background: 210 25% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    --primary: 235 86% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 214 32% 93%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 214 32% 93%;
+    --muted-foreground: 215 16% 45%;
+    --accent: 214 32% 91%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 32% 88%;
+    --input: 214 32% 88%;
+    --ring: 235 86% 65%;
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 224 45% 7%;
     --foreground: 210 40% 98%;
-    --card: 222 47% 13%;
+    --card: 224 45% 10%;
     --card-foreground: 210 40% 98%;
-    --popover: 222 47% 13%;
+    --popover: 224 45% 9%;
     --popover-foreground: 210 40% 98%;
-    --primary: 217 91% 60%;
-    --primary-foreground: 222 47% 11%;
-    --secondary: 217 33% 17%;
+    --primary: 235 86% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 217 33% 15%;
     --secondary-foreground: 210 40% 98%;
-    --muted: 217 33% 17%;
+    --muted: 217 33% 15%;
     --muted-foreground: 215 20% 65%;
-    --accent: 217 33% 20%;
+    --accent: 217 33% 18%;
     --accent-foreground: 210 40% 98%;
     --destructive: 0 63% 31%;
     --destructive-foreground: 210 40% 98%;
-    --border: 217 33% 20%;
-    --input: 217 33% 20%;
-    --ring: 224 76% 48%;
-    --radius: 0.5rem;
+    --border: 217 33% 18%;
+    --input: 217 33% 18%;
+    --ring: 235 86% 65%;
   }
+
+  .discord {
+    --background: 223 7% 20%;
+    --foreground: 210 10% 95%;
+    --card: 220 7% 18%;
+    --card-foreground: 210 10% 95%;
+    --popover: 225 6% 13%;
+    --popover-foreground: 210 10% 95%;
+    --primary: 235 86% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 225 6% 13%;
+    --secondary-foreground: 210 10% 95%;
+    --muted: 223 7% 24%;
+    --muted-foreground: 214 8% 61%;
+    --accent: 223 7% 25%;
+    --accent-foreground: 210 10% 95%;
+    --destructive: 359 83% 59%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 225 6% 13%;
+    --input: 225 6% 13%;
+    --ring: 235 86% 65%;
+  }
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 body {
   background-color: hsl(var(--background));
   color: hsl(var(--foreground));
   font-feature-settings: "rlig" 1, "calt" 1;
+}
+
+.hero-glow {
+  position: absolute;
+  background: hsl(var(--primary) / 25%);
+  border-radius: 9999px;
+  filter: blur(120px);
+  will-change: transform;
+  pointer-events: none;
+}
+
+/* Theme-aware overrides for slate surfaces across light & discord modes */
+html.light .bg-slate-950,
+html.light .bg-slate-950\/80,
+html.light .bg-slate-950\/70 {
+  background-color: hsl(var(--background)) !important;
+}
+
+html.light .bg-slate-900,
+html.light .bg-slate-900\/95,
+html.light .bg-slate-900\/90,
+html.light .bg-slate-900\/50,
+html.light .bg-slate-900\/40 {
+  background-color: hsl(var(--card)) !important;
+}
+
+html.light .bg-slate-800 {
+  background-color: hsl(var(--secondary)) !important;
+}
+
+html.light .border-slate-800,
+html.light .border-slate-800\/80,
+html.light .border-slate-700 {
+  border-color: hsl(var(--border)) !important;
+}
+
+html.light .text-slate-100,
+html.light .text-slate-200 {
+  color: hsl(var(--foreground)) !important;
+}
+
+html.light .text-slate-300,
+html.light .text-slate-400,
+html.light .text-slate-500 {
+  color: hsl(var(--muted-foreground)) !important;
+}
+
+html.discord .bg-slate-950,
+html.discord .bg-slate-950\/80,
+html.discord .bg-slate-950\/70 {
+  background-color: #313338 !important;
+}
+
+html.discord .bg-slate-900,
+html.discord .bg-slate-900\/95,
+html.discord .bg-slate-900\/90,
+html.discord .bg-slate-900\/50,
+html.discord .bg-slate-900\/40 {
+  background-color: #2b2d31 !important;
+}
+
+html.discord .bg-slate-800 {
+  background-color: #1e1f22 !important;
+}
+
+html.discord .border-slate-800,
+html.discord .border-slate-800\/80,
+html.discord .border-slate-700 {
+  border-color: #1e1f22 !important;
+}
+
+/* React Flow Controls & MiniMap adaptation */
+.react-flow__controls-button {
+  background-color: hsl(var(--card)) !important;
+  border-bottom: 1px solid hsl(var(--border)) !important;
+  fill: hsl(var(--foreground)) !important;
+  color: hsl(var(--foreground)) !important;
+}
+
+.react-flow__controls-button:hover {
+  background-color: hsl(var(--accent)) !important;
 }

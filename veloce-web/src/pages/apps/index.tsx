@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { api, getApiUrl, App } from "@/lib/api";
 import { useCurrentUser } from "@/lib/useAuth";
 import { AuthBarrier } from "@/components/auth/AuthBarrier";
+import { ThemeSwitch } from "@/components/common/ThemeSwitch";
 
 export default function AppsPage() {
   const queryClient = useQueryClient();
@@ -123,25 +124,27 @@ export default function AppsPage() {
         <title>Applications - Veloce</title>
       </Head>
 
-      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col overflow-x-hidden selection:bg-indigo-500/30">
+      <div className="min-h-screen bg-background text-foreground flex flex-col overflow-x-hidden selection:bg-primary/30">
         {/* Navigation */}
-        <header className="border-b border-slate-800/80 px-4 sm:px-6 py-3.5 flex items-center justify-between bg-slate-950/80 backdrop-blur sticky top-0 z-40">
+        <header className="border-b border-border/80 px-4 sm:px-6 py-3.5 flex items-center justify-between bg-background/80 backdrop-blur sticky top-0 z-40">
           <div className="flex items-center gap-3">
             <Link href="/" className="flex items-center gap-2">
-              <div className="p-2 bg-indigo-600/10 rounded-xl border border-indigo-500/20 text-indigo-400">
+              <div className="p-2 bg-primary/15 rounded-xl border border-primary/25 text-primary">
                 <Zap className="w-4 h-4 fill-current" />
               </div>
-              <span className="font-bold text-base tracking-tight text-slate-100">
+              <span className="font-bold text-base tracking-tight text-foreground">
                 VELOCE
               </span>
             </Link>
-            <div className="h-4 w-px bg-slate-800 hidden sm:block" />
-            <span className="text-xs font-medium text-slate-400 hidden sm:inline">Applications</span>
+            <div className="h-4 w-px bg-border hidden sm:block" />
+            <span className="text-xs font-medium text-muted-foreground hidden sm:inline">Applications</span>
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
+            <ThemeSwitch />
+
             {user && (
-              <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
+              <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-card border border-border text-xs">
                 {user.discord_avatar ? (
                   <img
                     src={`https://cdn.discordapp.com/avatars/${user.discord_id}/${user.discord_avatar}.png?size=32`}
@@ -149,22 +152,22 @@ export default function AppsPage() {
                     className="w-4 h-4 rounded-full"
                   />
                 ) : (
-                  <UserIcon className="w-3.5 h-3.5 text-slate-400" />
+                  <UserIcon className="w-3.5 h-3.5 text-muted-foreground" />
                 )}
-                <span className="font-medium text-slate-300 hidden md:inline">{user.display_name}</span>
+                <span className="font-medium text-foreground hidden md:inline">{user.display_name}</span>
               </div>
             )}
 
             <button
               onClick={() => setModalOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm transition"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-primary hover:opacity-95 text-primary-foreground shadow-sm transition"
             >
               <Plus className="w-3.5 h-3.5" /> Connect Bot
             </button>
 
             <button
               onClick={handleLogout}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-900 transition"
+              className="p-1.5 rounded-lg text-muted-foreground hover:text-rose-400 hover:bg-card transition"
               title="Sign out"
             >
               <LogOut className="w-4 h-4" />
