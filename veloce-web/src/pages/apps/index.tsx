@@ -29,7 +29,11 @@ export default function AppsPage() {
   });
 
   const getWebhookUrl = (appId: string) => {
-    return getApiUrl(`/v1/interactions/${appId}`);
+    const path = getApiUrl(`/v1/interactions/${appId}`);
+    if (path.startsWith("/") && typeof window !== "undefined") {
+      return `${window.location.origin}${path}`;
+    }
+    return path;
   };
 
   const copyWebhookUrl = (appId: string) => {

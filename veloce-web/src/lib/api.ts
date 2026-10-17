@@ -2,26 +2,23 @@ export function getApiBaseUrl(): string {
   if (process.env.NEXT_PUBLIC_API_URL) {
     return process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, "");
   }
-  if (typeof window !== "undefined") {
-    if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
-      return "http://localhost:8080";
-    }
-    return window.location.origin;
-  }
-  return "http://localhost:8080";
+  return "";
 }
 
 export function getApiUrl(path?: string): string {
   const baseUrl = getApiBaseUrl();
-  if (!path) return baseUrl;
-  return baseUrl.replace(/\/$/, "") + path;
+  if (!path) return baseUrl || "/";
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  if (!baseUrl) return cleanPath;
+  return `${baseUrl}${cleanPath}`;
 }
 
 export function getLoginUrl(redirect = "/apps"): string {
   return getApiUrl(`/v1/auth/login?redirect=${encodeURIComponent(redirect)}`);
 }
 
-export const loginUrl = typeof window !== "undefined" ? getLoginUrl("/apps") : "/v1/auth/login?redirect=%2Fapps";
+export const loginUrl = getLoginUrl("/apps");
+
 
 
 export interface User {
