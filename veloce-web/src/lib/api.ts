@@ -203,14 +203,18 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     let errorMsg = `Request failed: ${res.statusText}`;
+    let errorCode: string | undefined;
     try {
       const data = await res.json();
       if (data.message) errorMsg = data.message;
       else if (data.error) errorMsg = data.error;
+      if (data.code) errorCode = data.code;
     } catch {
       // ignore
     }
-    throw new Error(errorMsg);
+    const err = new Error(errorMsg) as Error & { code?: string };
+    if (errorCode) err.code = errorCode;
+    throw err;
   }
 
   return res.json();

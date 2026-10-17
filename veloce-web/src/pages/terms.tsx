@@ -130,7 +130,32 @@ export default function TermsPage() {
 
           <section className="space-y-3">
             <h2 className="text-xl sm:text-2xl font-bold text-foreground">
-              4. Refunds
+              4. Fair Use &amp; Anti-Abuse Quota
+            </h2>
+            <p>
+              To ensure high availability, edge performance, and compliance with Discord&apos;s
+              Gateway and REST API rate limits for all customers, &quot;Unlimited&quot; subscription
+              tiers (including the <strong className="text-foreground">Studio</strong> plan) are
+              governed by a <strong className="text-foreground">Fair Use soft cap of 30 active bots</strong>{" "}
+              per account alongside standard Cloudflare Edge execution quotas to prevent platform
+              abuse, token farming, and Discord API rate-limit violations.
+            </p>
+            <p>
+              Users whose legitimate operations exceed the 30-bot Fair Use allocation must purchase
+              additional capacity add-on packs (
+              <code className="font-mono text-xs bg-card px-1.5 py-0.5 rounded border border-border text-foreground">
+                extra_bot_slots
+              </code>
+              ) or contact support for custom enterprise provisioning. Veloce reserves the sole right
+              to throttle, restrict, or permanently suspend any account or bot engaging in mass
+              bot-token automation, server raids, spam, or abusive resource consumption without prior
+              notice or refund.
+            </p>
+          </section>
+
+          <section className="space-y-3">
+            <h2 className="text-xl sm:text-2xl font-bold text-foreground">
+              5. Refunds
             </h2>
             <p>
               We offer a 14-day refund window on initial subscription purchases in accordance
@@ -144,7 +169,7 @@ export default function TermsPage() {
 
           <section className="space-y-3">
             <h2 className="text-xl sm:text-2xl font-bold text-foreground">
-              5. User Content &amp; Bot Configurations
+              6. User Content &amp; Bot Configurations
             </h2>
             <p>
               You retain full ownership of the custom command flows, embeds, messages, and event
@@ -156,7 +181,7 @@ export default function TermsPage() {
 
           <section className="space-y-3">
             <h2 className="text-xl sm:text-2xl font-bold text-foreground">
-              6. Intellectual Property
+              7. Intellectual Property
             </h2>
             <p>
               The Service and its original visual flow builder, runtime engine, features, and
@@ -167,7 +192,7 @@ export default function TermsPage() {
 
           <section className="space-y-3">
             <h2 className="text-xl sm:text-2xl font-bold text-foreground">
-              7. Disclaimer of Warranty &amp; Limitation of Liability
+              8. Disclaimer of Warranty &amp; Limitation of Liability
             </h2>
             <p>
               These Services are provided by Veloce on an &quot;as is&quot; and &quot;as
@@ -186,7 +211,7 @@ export default function TermsPage() {
 
           <section className="space-y-3">
             <h2 className="text-xl sm:text-2xl font-bold text-foreground">
-              8. Termination
+              9. Termination
             </h2>
             <p>
               You may delete your bots or discontinue using the Service at any time directly from
@@ -198,7 +223,7 @@ export default function TermsPage() {
 
           <section className="space-y-3">
             <h2 className="text-xl sm:text-2xl font-bold text-foreground">
-              9. Changes to Terms
+              10. Changes to Terms
             </h2>
             <p>
               We may amend these Terms at any time by posting the amended terms on this page.

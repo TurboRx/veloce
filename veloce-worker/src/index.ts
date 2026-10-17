@@ -33,6 +33,11 @@ const activeGatewaySessions = new Map<string, number>();
 const activeGatewaySockets = new Map<string, WebSocket>();
 let schemaMigrated = false;
 
+// Silent backend Fair Use & Plan Bot Creation Limits
+const STARTER_LIMIT = 2;
+const PRO_LIMIT = 10;
+const STUDIO_BOT_SOFT_LIMIT = 30;
+
 app.use(
   "*",
   cors({
@@ -86,6 +91,8 @@ function getPublicOrigin(c: any): string {
 async function ensureSchema(sql: any) {
   if (schemaMigrated) return;
   try {
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'free'`;
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS extra_bot_slots INTEGER NOT NULL DEFAULT 0`;
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'free'`;
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS custom_branding BOOLEAN NOT NULL DEFAULT false`;
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS discord_status JSONB`;
@@ -868,6 +875,82 @@ app.post("/v1/apps", async (c) => {
 
   await ensureAdminUser(sql);
 
+  const cookies = parseCookies(c.req.header("cookie"));
+  const ownerUserId = cookies["veloce_session"] || "usr_admin";
+
+  // Load user's account plan + extra_bot_slots and existing bots to enforce Fair Use / Plan quotas
+  const userRows = await sql`
+    SELECT id, plan, COALESCE(extra_bot_slots, 0) AS extra_bot_slots
+    FROM users
+    WHERE id = ${ownerUserId}
+    LIMIT 1
+  `.catch(() => []);
+  const userRecord = userRows?.[0] || { plan: "free", extra_bot_slots: 0 };
+  const extraBotSlots = Math.max(0, Number(userRecord.extra_bot_slots || 0));
+
+  const existingApps = await sql`
+    SELECT id, plan, enabled
+    FROM apps
+    WHERE owner_user_id = ${ownerUserId} OR owner_user_id = 'usr_admin'
+  `;
+
+  const hasStudioTier =
+    userRecord.plan === "studio" ||
+    existingApps.some((a: any) => a.plan === "studio");
+  const hasProTier =
+    !hasStudioTier &&
+    (userRecord.plan === "pro" || existingApps.some((a: any) => a.plan === "pro"));
+
+  const activeBotCount = existingApps.filter((a: any) => a.enabled !== false).length;
+
+  if (hasStudioTier) {
+    const studioMaxBots = STUDIO_BOT_SOFT_LIMIT + extraBotSlots;
+    if (activeBotCount >= studioMaxBots) {
+      const msg =
+        "You've reached the Studio Fair Use allocation (30 active bots). Purchase an expansion pack or contact support to add more bot slots.";
+      return c.json(
+        {
+          code: "FAIR_USE_LIMIT_REACHED",
+          message: msg,
+          error: msg,
+          limit: studioMaxBots,
+          extra_bot_slots: extraBotSlots,
+        },
+        403
+      );
+    }
+  } else if (hasProTier) {
+    const proMaxBots = PRO_LIMIT + extraBotSlots;
+    if (activeBotCount >= proMaxBots) {
+      const msg = `You've reached the Pro plan allocation (${PRO_LIMIT} active bots). Upgrade to Studio or purchase additional bot slots to connect more bots.`;
+      return c.json(
+        {
+          code: "PLAN_LIMIT_REACHED",
+          message: msg,
+          error: msg,
+          limit: proMaxBots,
+          extra_bot_slots: extraBotSlots,
+        },
+        403
+      );
+    }
+  } else {
+    const starterMaxBots = STARTER_LIMIT + extraBotSlots;
+    if (activeBotCount >= starterMaxBots) {
+      const msg = `You've reached the Free Starter plan allocation (${STARTER_LIMIT} active bots). Upgrade to Pro ($5.99/mo) or Studio ($14.99/mo) to connect more bots.`;
+      return c.json(
+        {
+          code: "PLAN_LIMIT_REACHED",
+          message: msg,
+          error: msg,
+          limit: starterMaxBots,
+          extra_bot_slots: extraBotSlots,
+        },
+        403
+      );
+    }
+  }
+
   let discordId = "000000000000000000";
   let botUsername = customName || "Discord Bot";
   let botAvatar: string | null = null;
@@ -887,22 +970,24 @@ app.post("/v1/apps", async (c) => {
   }
 
   const appId = "app_" + crypto.randomUUID().replace(/-/g, "").substring(0, 16);
+  const initialPlan = hasStudioTier ? "studio" : hasProTier ? "pro" : "free";
+  const initialCustomBranding = hasStudioTier || hasProTier;
 
   const rows = await sql`
     INSERT INTO apps (
       id, owner_user_id, creator_user_id, name, discord_id, discord_token, discord_public_key, discord_avatar, enabled, plan, custom_branding, created_at, updated_at
     ) VALUES (
       ${appId},
-      'usr_admin',
-      'usr_admin',
+      ${ownerUserId},
+      ${ownerUserId},
       ${botUsername},
       ${discordId},
       ${token},
       ${publicKey || null},
       ${botAvatar},
       true,
-      'free',
-      false,
+      ${initialPlan},
+      ${initialCustomBranding},
       NOW(),
       NOW()
     )
@@ -1344,7 +1429,8 @@ async function handleVerifiedDodoWebhookRaw(
       case "subscription.renewed":
       case "subscription.unpaused": {
         const planSlug = resolvePlanFromEvent();
-        await sql`
+        const extraSlotsPurchased = Math.max(0, Number(metadata.extra_bot_slots || 0));
+        const updatedAppRows = await sql`
           UPDATE apps
           SET
             plan = ${planSlug},
@@ -1356,7 +1442,17 @@ async function handleVerifiedDodoWebhookRaw(
             next_billing_date = COALESCE(${nextBilling}::timestamptz, next_billing_date, NOW() + INTERVAL '30 days'),
             updated_at = NOW()
           WHERE id = ${targetAppId}
+          RETURNING owner_user_id
         `;
+        const ownerId = updatedAppRows?.[0]?.owner_user_id || metadata.user_id || "usr_admin";
+        await sql`
+          UPDATE users
+          SET
+            plan = CASE WHEN plan = 'studio' THEN 'studio' ELSE ${planSlug} END,
+            extra_bot_slots = COALESCE(extra_bot_slots, 0) + ${extraSlotsPurchased},
+            updated_at = NOW()
+          WHERE id = ${ownerId}
+        `.catch(() => {});
         await sql`
           INSERT INTO logs (app_id, message, level, details, created_at)
           VALUES (

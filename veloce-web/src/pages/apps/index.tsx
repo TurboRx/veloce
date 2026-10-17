@@ -709,12 +709,50 @@ export default function AppsPage() {
                     className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary font-mono"
                   />
                 </div>
+
+                {createAppMutation.isError && (
+                  <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs space-y-2">
+                    <div className="font-semibold text-amber-400 flex items-center gap-1.5">
+                      <Crown className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        {(createAppMutation.error as any)?.code === "FAIR_USE_LIMIT_REACHED"
+                          ? "Studio Fair Use Allocation Reached"
+                          : "Bot Slot Allocation Reached"}
+                      </span>
+                    </div>
+                    <p className="text-muted-foreground leading-relaxed">
+                      {(createAppMutation.error as any)?.message ||
+                        "You have reached your current bot slot allocation."}
+                    </p>
+                    {apps && apps.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setModalOpen(false);
+                          createAppMutation.reset();
+                          openSettingsModal(apps[0], "branding");
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground font-semibold text-[11px] shadow-sm hover:opacity-95 transition"
+                      >
+                        <Sparkles className="w-3 h-3" />
+                        <span>
+                          {(createAppMutation.error as any)?.code === "FAIR_USE_LIMIT_REACHED"
+                            ? "Add Extra Bot Slots"
+                            : "Upgrade Plan"}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="mt-6 flex items-center justify-end gap-2.5">
                 <button
                   type="button"
-                  onClick={() => setModalOpen(false)}
+                  onClick={() => {
+                    createAppMutation.reset();
+                    setModalOpen(false);
+                  }}
                   className="px-3.5 py-2 text-xs font-medium rounded-lg text-muted-foreground hover:text-foreground transition"
                 >
                   Cancel
