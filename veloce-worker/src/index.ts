@@ -3,6 +3,15 @@ import { cors } from "hono/cors";
 import { neon } from "@neondatabase/serverless";
 import { verifyDiscordSignature } from "./crypto";
 import { applyBranding, executeFlow, InteractionPayload } from "./flow";
+import {
+  createDodoClient,
+  ensureDodoProducts,
+  loadDodoRuntimeConfig,
+  PLAN_CATALOG,
+  resolveDodoEnvironment,
+  signStandardWebhookPayload,
+  VelocePlanSlug,
+} from "./dodo";
 
 export interface Env {
   DATABASE_URL: string;
@@ -10,6 +19,11 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   DISCORD_CLIENT_ID?: string;
   DISCORD_CLIENT_SECRET?: string;
+  DODO_PAYMENTS_API_KEY?: string;
+  DODO_PAYMENTS_WEBHOOK_KEY?: string;
+  DODO_PAYMENTS_ENVIRONMENT?: string;
+  DODO_PRODUCT_PRO_ID?: string;
+  DODO_PRODUCT_STUDIO_ID?: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -34,7 +48,15 @@ app.use(
       return "*";
     },
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "X-Signature-Ed25519", "X-Signature-Timestamp"],
+    allowHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Signature-Ed25519",
+      "X-Signature-Timestamp",
+      "webhook-id",
+      "webhook-signature",
+      "webhook-timestamp",
+    ],
     credentials: true,
   })
 );
@@ -67,6 +89,27 @@ async function ensureSchema(sql: any) {
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'free'`;
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS custom_branding BOOLEAN NOT NULL DEFAULT false`;
     await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS discord_status JSONB`;
+    await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS dodo_subscription_id TEXT`;
+    await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS dodo_customer_id TEXT`;
+    await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS subscription_status TEXT NOT NULL DEFAULT 'none'`;
+    await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS cancel_at_next_billing_date BOOLEAN NOT NULL DEFAULT false`;
+    await sql`ALTER TABLE apps ADD COLUMN IF NOT EXISTS next_billing_date TIMESTAMPTZ`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS dodo_webhook_events (
+        webhook_id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        app_id TEXT,
+        payload JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS dodo_config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
     schemaMigrated = true;
   } catch (err) {
     console.error("ensureSchema error", err);
@@ -777,7 +820,7 @@ app.get("/v1/apps", async (c) => {
   const sql = neon(c.env.DATABASE_URL);
   await ensureSchema(sql);
   const rows = await sql`
-    SELECT id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, discord_token, plan, custom_branding, discord_status, created_at, updated_at
+    SELECT id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, discord_token, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
     FROM apps
     ORDER BY created_at DESC
   `;
@@ -802,7 +845,7 @@ app.get("/v1/apps/:id", async (c) => {
   await ensureSchema(sql);
   const id = c.req.param("id");
   const rows = await sql`
-    SELECT id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, plan, custom_branding, discord_status, created_at, updated_at
+    SELECT id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
     FROM apps
     WHERE id = ${id}
     LIMIT 1
@@ -863,7 +906,7 @@ app.post("/v1/apps", async (c) => {
       NOW(),
       NOW()
     )
-    RETURNING id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, plan, custom_branding, discord_status, created_at, updated_at
+    RETURNING id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
   `;
 
   const createdApp = { ...rows[0], discord_token: token };
@@ -884,14 +927,16 @@ app.patch("/v1/apps/:id", async (c) => {
   const body = await c.req.json();
 
   const existing = await sql`
-    SELECT id, discord_id, discord_token, plan, custom_branding
+    SELECT id, discord_id, discord_token, plan, custom_branding, subscription_status
     FROM apps
     WHERE id = ${id}
     LIMIT 1
   `;
   if (!existing || existing.length === 0) return c.json({ error: "App not found" }, 404);
 
-  const nextPlan = body.plan ?? existing[0].plan ?? "free";
+  // Paid plan upgrades are granted strictly via verified Dodo Payments webhooks (never directly from client PATCH)
+  const currentPlan = existing[0].plan || "free";
+  const nextPlan = body.plan === "free" ? "free" : currentPlan;
   const canUseCustomBranding = nextPlan === "pro" || nextPlan === "studio";
   const nextCustomBranding = canUseCustomBranding
     ? body.custom_branding ?? existing[0].custom_branding ?? false
@@ -917,7 +962,7 @@ app.patch("/v1/apps/:id", async (c) => {
       discord_status = CASE WHEN ${body.discord_status !== undefined} THEN ${JSON.stringify(body.discord_status)}::jsonb ELSE discord_status END,
       updated_at = NOW()
     WHERE id = ${id}
-    RETURNING id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, plan, custom_branding, discord_status, created_at, updated_at
+    RETURNING id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
   `;
 
   return c.json(rows[0]);
@@ -1211,6 +1256,764 @@ app.get("/v1/apps/:app_id/gateway", async (c) => {
     serverless: true,
     last_ping_at: new Date().toISOString(),
     guild_count: guildCount,
+  });
+});
+
+// ============================================================================
+// Dodo Payments Integration (Test Mode & Live Mode)
+// ============================================================================
+
+async function handleVerifiedDodoWebhookRaw(
+  sql: any,
+  config: Awaited<ReturnType<typeof loadDodoRuntimeConfig>>,
+  rawBody: string,
+  headers: {
+    "webhook-id": string;
+    "webhook-signature": string;
+    "webhook-timestamp": string;
+  },
+  waitUntil?: (promise: Promise<any>) => void
+) {
+  const client = createDodoClient(config);
+
+  // 1. Verify Standard Webhooks signature on exact raw bytes using Dodo SDK
+  const event: any = client.webhooks.unwrap(rawBody, {
+    headers: {
+      "webhook-id": headers["webhook-id"],
+      "webhook-signature": headers["webhook-signature"],
+      "webhook-timestamp": headers["webhook-timestamp"],
+    },
+  });
+
+  const webhookId = headers["webhook-id"];
+  const eventType: string = event.type || "unknown";
+  const data: any = event.data || {};
+  const metadata: any = data.metadata || {};
+  let targetAppId: string | null = metadata.app_id || null;
+
+  // Resolve app by dodo_subscription_id or dodo_customer_id if metadata.app_id was not on the event
+  if (!targetAppId && data.subscription_id) {
+    const subRows = await sql`
+      SELECT id FROM apps WHERE dodo_subscription_id = ${data.subscription_id} LIMIT 1
+    `;
+    if (subRows && subRows.length > 0) targetAppId = subRows[0].id;
+  }
+  if (!targetAppId && data.customer?.customer_id) {
+    const cusRows = await sql`
+      SELECT id FROM apps WHERE dodo_customer_id = ${data.customer.customer_id} ORDER BY updated_at DESC LIMIT 1
+    `;
+    if (cusRows && cusRows.length > 0) targetAppId = cusRows[0].id;
+  }
+
+  // 2. Atomic idempotency claim via UNIQUE primary key on dodo_webhook_events
+  const claim = await sql`
+    INSERT INTO dodo_webhook_events (webhook_id, event_type, app_id, payload, created_at)
+    VALUES (${webhookId}, ${eventType}, ${targetAppId}, ${rawBody}::jsonb, NOW())
+    ON CONFLICT (webhook_id) DO NOTHING
+    RETURNING webhook_id
+  `;
+
+  if (!claim || claim.length === 0) {
+    return { received: true, duplicate: true, event_type: eventType, app_id: targetAppId };
+  }
+
+  // Determine plan slug from metadata or product_id
+  const resolvePlanFromEvent = (): VelocePlanSlug => {
+    if (metadata.plan === "studio") return "studio";
+    if (metadata.plan === "pro") return "pro";
+    if (
+      data.product_id &&
+      (data.product_id === config.studioProductId ||
+        String(data.product_id).includes("studio"))
+    ) {
+      return "studio";
+    }
+    if (data.total_amount === 1499 || data.recurring_pre_tax_amount === 1499) {
+      return "studio";
+    }
+    return "pro";
+  };
+
+  if (targetAppId) {
+    const subId = data.subscription_id || null;
+    const cusId = data.customer?.customer_id || null;
+    const nextBilling = data.next_billing_date || null;
+
+    switch (eventType) {
+      case "subscription.active":
+      case "subscription.renewed":
+      case "subscription.unpaused": {
+        const planSlug = resolvePlanFromEvent();
+        await sql`
+          UPDATE apps
+          SET
+            plan = ${planSlug},
+            custom_branding = true,
+            subscription_status = 'active',
+            cancel_at_next_billing_date = false,
+            dodo_subscription_id = COALESCE(${subId}, dodo_subscription_id),
+            dodo_customer_id = COALESCE(${cusId}, dodo_customer_id),
+            next_billing_date = COALESCE(${nextBilling}::timestamptz, next_billing_date, NOW() + INTERVAL '30 days'),
+            updated_at = NOW()
+          WHERE id = ${targetAppId}
+        `;
+        await sql`
+          INSERT INTO logs (app_id, message, level, details, created_at)
+          VALUES (
+            ${targetAppId},
+            ${`Dodo Payments webhook (${eventType}): Upgraded bot to ${planSlug.toUpperCase()} plan and unlocked custom branding.`},
+            'info',
+            ${JSON.stringify({ webhook_id: webhookId, subscription_id: subId, customer_id: cusId })}::jsonb,
+            NOW()
+          )
+        `.catch(() => {});
+        break;
+      }
+
+      case "subscription.plan_changed":
+      case "subscription.updated": {
+        const planSlug = resolvePlanFromEvent();
+        const status = data.status || "active";
+        const cancelAtEnd = Boolean(data.cancel_at_next_billing_date);
+        await sql`
+          UPDATE apps
+          SET
+            plan = ${status === "active" || status === "past_due" ? planSlug : "free"},
+            custom_branding = ${status === "active" || status === "past_due"},
+            subscription_status = ${status},
+            cancel_at_next_billing_date = ${cancelAtEnd},
+            dodo_subscription_id = COALESCE(${subId}, dodo_subscription_id),
+            dodo_customer_id = COALESCE(${cusId}, dodo_customer_id),
+            next_billing_date = COALESCE(${nextBilling}::timestamptz, next_billing_date),
+            updated_at = NOW()
+          WHERE id = ${targetAppId}
+        `;
+        break;
+      }
+
+      case "subscription.past_due": {
+        // Customer keeps access during the payment grace period
+        await sql`
+          UPDATE apps
+          SET
+            subscription_status = 'past_due',
+            updated_at = NOW()
+          WHERE id = ${targetAppId}
+        `;
+        break;
+      }
+
+      case "subscription.on_hold":
+      case "subscription.paused":
+      case "subscription.expired":
+      case "subscription.failed": {
+        const nextStatus = eventType.replace("subscription.", "");
+        await sql`
+          UPDATE apps
+          SET
+            plan = 'free',
+            custom_branding = false,
+            subscription_status = ${nextStatus},
+            updated_at = NOW()
+          WHERE id = ${targetAppId}
+        `;
+        await sql`
+          INSERT INTO logs (app_id, message, level, details, created_at)
+          VALUES (
+            ${targetAppId},
+            ${`Dodo Payments webhook (${eventType}): Subscription moved to ${nextStatus}. Reverted bot to Free Starter plan.`},
+            'warn',
+            ${JSON.stringify({ webhook_id: webhookId, subscription_id: subId })}::jsonb,
+            NOW()
+          )
+        `.catch(() => {});
+        break;
+      }
+
+      case "subscription.cancelled": {
+        const cancelAtPeriodEnd = Boolean(data.cancel_at_next_billing_date);
+        if (cancelAtPeriodEnd) {
+          // Keep paid plan active until period end
+          await sql`
+            UPDATE apps
+            SET
+              cancel_at_next_billing_date = true,
+              next_billing_date = COALESCE(${nextBilling}::timestamptz, next_billing_date),
+              updated_at = NOW()
+            WHERE id = ${targetAppId}
+          `;
+        } else {
+          // Immediate cancellation revokes paid access right away
+          await sql`
+            UPDATE apps
+            SET
+              plan = 'free',
+              custom_branding = false,
+              subscription_status = 'cancelled',
+              cancel_at_next_billing_date = false,
+              updated_at = NOW()
+            WHERE id = ${targetAppId}
+          `;
+        }
+        break;
+      }
+
+      case "refund.succeeded": {
+        await sql`
+          UPDATE apps
+          SET
+            plan = 'free',
+            custom_branding = false,
+            subscription_status = 'cancelled',
+            cancel_at_next_billing_date = false,
+            updated_at = NOW()
+          WHERE id = ${targetAppId}
+        `;
+        await sql`
+          INSERT INTO logs (app_id, message, level, details, created_at)
+          VALUES (
+            ${targetAppId},
+            'Dodo Payments webhook (refund.succeeded): Refund processed, reverted bot to Free Starter plan.',
+            'info',
+            ${JSON.stringify({ webhook_id: webhookId })}::jsonb,
+            NOW()
+          )
+        `.catch(() => {});
+        break;
+      }
+
+      case "payment.succeeded": {
+        await sql`
+          INSERT INTO logs (app_id, message, level, details, created_at)
+          VALUES (
+            ${targetAppId},
+            ${`Dodo Payments webhook (payment.succeeded): Payment ${data.payment_id || ""} confirmed.`},
+            'info',
+            ${JSON.stringify({ webhook_id: webhookId, payment_id: data.payment_id, total_amount: data.total_amount })}::jsonb,
+            NOW()
+          )
+        `.catch(() => {});
+        break;
+      }
+
+      case "payment.failed": {
+        await sql`
+          INSERT INTO logs (app_id, message, level, details, created_at)
+          VALUES (
+            ${targetAppId},
+            ${`Dodo Payments webhook (payment.failed): Payment attempt declined (${data.error_message || "card declined"}).`},
+            'error',
+            ${JSON.stringify({ webhook_id: webhookId, payment_id: data.payment_id, error_code: data.error_code })}::jsonb,
+            NOW()
+          )
+        `.catch(() => {});
+        break;
+      }
+    }
+
+    // Refresh bot gateway presence if the bot is enabled
+    if (waitUntil) {
+      waitUntil(
+        (async () => {
+          const updatedRows = await sql`
+            SELECT id, name, discord_id, discord_token, enabled, plan, custom_branding, discord_status
+            FROM apps
+            WHERE id = ${targetAppId} AND enabled = true
+            LIMIT 1
+          `;
+          if (updatedRows && updatedRows.length > 0) {
+            disconnectBotGatewayImmediate(targetAppId!);
+            await maintainBotGateway(updatedRows[0], sql, 15000);
+          }
+        })()
+      );
+    }
+  }
+
+  return {
+    received: true,
+    duplicate: false,
+    event_type: eventType,
+    app_id: targetAppId,
+  };
+}
+
+// Official Dodo Webhook Endpoint (verifies Standard Webhooks signature on raw body)
+async function handleDodoWebhookRoute(c: any) {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const config = await loadDodoRuntimeConfig(sql, c.env);
+
+  const rawBody = await c.req.text();
+  const webhookId = c.req.header("webhook-id") || "";
+  const webhookSignature = c.req.header("webhook-signature") || "";
+  const webhookTimestamp = c.req.header("webhook-timestamp") || "";
+
+  if (!webhookId || !webhookSignature || !webhookTimestamp) {
+    return c.json({ error: "Missing required Standard Webhooks headers" }, 400);
+  }
+
+  try {
+    const result = await handleVerifiedDodoWebhookRaw(
+      sql,
+      config,
+      rawBody,
+      {
+        "webhook-id": webhookId,
+        "webhook-signature": webhookSignature,
+        "webhook-timestamp": webhookTimestamp,
+      },
+      (p) => c.executionCtx.waitUntil(p)
+    );
+    return c.json(result, 200);
+  } catch (err: any) {
+    console.error("Dodo webhook signature verification failed:", err);
+    return c.json({ error: "Invalid webhook signature" }, 401);
+  }
+}
+
+app.post("/v1/webhooks/dodo", handleDodoWebhookRoute);
+app.post("/api/webhook/dodo", handleDodoWebhookRoute);
+
+// Get Dodo Billing Status, Active Products & Recent Verified Webhooks
+app.get("/v1/billing/status", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const config = await loadDodoRuntimeConfig(sql, c.env);
+
+  const recentWebhooks = await sql`
+    SELECT webhook_id, event_type, app_id, created_at
+    FROM dodo_webhook_events
+    ORDER BY created_at DESC
+    LIMIT 10
+  `.catch(() => []);
+
+  return c.json({
+    environment: config.environment,
+    base_url:
+      config.environment === "live_mode"
+        ? "https://live.dodopayments.com"
+        : "https://test.dodopayments.com",
+    api_key_configured: Boolean(config.apiKey),
+    api_key_masked: config.apiKey
+      ? `${config.apiKey.slice(0, 10)}...${config.apiKey.slice(-4)}`
+      : null,
+    webhook_key_configured: Boolean(config.webhookKey),
+    pro_product_id: config.proProductId || "pdt_test_veloce_pro_599",
+    studio_product_id: config.studioProductId || "pdt_test_veloce_studio_1499",
+    webhook_endpoint: `${getPublicOrigin(c)}/v1/webhooks/dodo`,
+    plans: PLAN_CATALOG,
+    recent_webhooks: recentWebhooks,
+  });
+});
+
+// Configure Dodo Payments API Key / Test Mode Settings & Auto-Provision Products
+app.post("/v1/billing/config", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const body = await c.req.json();
+
+  if (body.api_key !== undefined) {
+    const val = String(body.api_key).trim();
+    if (val) {
+      await sql`
+        INSERT INTO dodo_config (key, value, updated_at)
+        VALUES ('api_key', ${val}, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+      `;
+    } else {
+      await sql`DELETE FROM dodo_config WHERE key = 'api_key'`;
+    }
+  }
+
+  if (body.webhook_key !== undefined) {
+    const val = String(body.webhook_key).trim();
+    if (val) {
+      await sql`
+        INSERT INTO dodo_config (key, value, updated_at)
+        VALUES ('webhook_key', ${val}, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+      `;
+    }
+  }
+
+  if (body.environment !== undefined) {
+    const envVal = resolveDodoEnvironment(body.environment);
+    await sql`
+      INSERT INTO dodo_config (key, value, updated_at)
+      VALUES ('environment', ${envVal}, NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `;
+  }
+
+  if (body.pro_product_id !== undefined && String(body.pro_product_id).trim()) {
+    await sql`
+      INSERT INTO dodo_config (key, value, updated_at)
+      VALUES ('pro_product_id', ${String(body.pro_product_id).trim()}, NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `;
+  }
+
+  if (body.studio_product_id !== undefined && String(body.studio_product_id).trim()) {
+    await sql`
+      INSERT INTO dodo_config (key, value, updated_at)
+      VALUES ('studio_product_id', ${String(body.studio_product_id).trim()}, NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `;
+  }
+
+  const updatedConfig = await loadDodoRuntimeConfig(sql, c.env);
+  let provisioningError: string | null = null;
+  let products = {
+    proProductId: updatedConfig.proProductId || "pdt_test_veloce_pro_599",
+    studioProductId: updatedConfig.studioProductId || "pdt_test_veloce_studio_1499",
+    isLiveApi: false,
+  };
+
+  if (updatedConfig.apiKey) {
+    try {
+      products = await ensureDodoProducts(sql, updatedConfig);
+    } catch (err: any) {
+      provisioningError = err?.message || "Failed to auto-provision products in Dodo API";
+    }
+  }
+
+  return c.json({
+    success: true,
+    environment: updatedConfig.environment,
+    api_key_configured: Boolean(updatedConfig.apiKey),
+    pro_product_id: products.proProductId,
+    studio_product_id: products.studioProductId,
+    provisioning_error: provisioningError,
+  });
+});
+
+// Create Dodo Payments Checkout Session (POST /v1/billing/checkout)
+app.post("/v1/billing/checkout", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const body = await c.req.json();
+
+  const appId = String(body.app_id || "").trim();
+  const planSlug: VelocePlanSlug = body.plan === "studio" ? "studio" : "pro";
+  const customerEmail = String(body.customer_email || "developer@veloce.app").trim();
+  const customerName = String(body.customer_name || "Discord Bot Owner").trim();
+  const discountCode = body.discount_code ? String(body.discount_code).trim() : undefined;
+
+  if (!appId) {
+    return c.json({ error: "app_id is required" }, 400);
+  }
+
+  const apps = await sql`
+    SELECT id, name, dodo_customer_id
+    FROM apps
+    WHERE id = ${appId}
+    LIMIT 1
+  `;
+  if (!apps || apps.length === 0) {
+    return c.json({ error: "Bot application not found" }, 404);
+  }
+  const botApp = apps[0];
+
+  const config = await loadDodoRuntimeConfig(sql, c.env);
+  const products = await ensureDodoProducts(sql, config).catch(() => ({
+    proProductId: config.proProductId || "pdt_test_veloce_pro_599",
+    studioProductId: config.studioProductId || "pdt_test_veloce_studio_1499",
+    isLiveApi: false,
+  }));
+
+  // Map allowlisted plan slug to server-side product ID (never trust client product_id)
+  const productId =
+    planSlug === "studio" ? products.studioProductId : products.proProductId;
+  const origin = getPublicOrigin(c);
+  const returnUrl = `${origin}/apps?dodo_checkout=return&app=${encodeURIComponent(
+    appId
+  )}&plan=${encodeURIComponent(planSlug)}`;
+
+  // If a real Dodo API key is configured and sandbox simulation isn't forced, call Dodo Checkout Sessions API
+  if (config.apiKey && !body.force_sandbox) {
+    try {
+      const client = createDodoClient(config);
+      const session = await client.checkoutSessions.create({
+        product_cart: [{ product_id: productId, quantity: 1 }],
+        customer: botApp.dodo_customer_id
+          ? { customer_id: botApp.dodo_customer_id }
+          : { email: customerEmail, name: customerName },
+        ...(discountCode ? { discount_codes: [discountCode] } : {}),
+        feature_flags: {
+          allow_discount_code: true,
+        },
+        customization: {
+          theme: "dark",
+          show_order_details: true,
+        },
+        metadata: {
+          app_id: appId,
+          plan: planSlug,
+          bot_name: botApp.name || "Discord Bot",
+        },
+        return_url: returnUrl,
+      });
+
+      return c.json({
+        mode: "dodo_hosted",
+        environment: config.environment,
+        session_id: session.session_id,
+        checkout_url: session.checkout_url,
+        product_id: productId,
+        plan: planSlug,
+      });
+    } catch (err: any) {
+      console.error("Dodo checkoutSessions.create error:", err);
+      return c.json(
+        {
+          error:
+            err?.message ||
+            "Failed to create Dodo Payments checkout session. Check your Dodo test API key.",
+        },
+        502
+      );
+    }
+  }
+
+  // Test Mode Interactive Checkout Session (when testing in test_mode without external API key or with force_sandbox)
+  const testSessionId = `cks_test_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  return c.json({
+    mode: "dodo_test_sandbox",
+    environment: "test_mode",
+    session_id: testSessionId,
+    checkout_url: `${origin}/apps?dodo_test_checkout=1&app=${encodeURIComponent(
+      appId
+    )}&plan=${encodeURIComponent(planSlug)}&session_id=${encodeURIComponent(testSessionId)}`,
+    product_id: productId,
+    plan: planSlug,
+    amount_cents: PLAN_CATALOG[planSlug].priceCents,
+    currency: "USD",
+  });
+});
+
+// Create Customer Portal Session (POST /v1/billing/portal)
+app.post("/v1/billing/portal", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const body = await c.req.json();
+  const appId = String(body.app_id || "").trim();
+
+  if (!appId) return c.json({ error: "app_id is required" }, 400);
+
+  // Resolve customer_id strictly from server database record, never from client input
+  const rows = await sql`
+    SELECT id, dodo_customer_id, dodo_subscription_id, plan
+    FROM apps
+    WHERE id = ${appId}
+    LIMIT 1
+  `;
+  if (!rows || rows.length === 0) return c.json({ error: "App not found" }, 404);
+  const botApp = rows[0];
+
+  const config = await loadDodoRuntimeConfig(sql, c.env);
+  if (config.apiKey && botApp.dodo_customer_id) {
+    try {
+      const client = createDodoClient(config);
+      const portal = await client.customers.customerPortal.create(
+        botApp.dodo_customer_id,
+        {
+          return_url: `${getPublicOrigin(c)}/apps`,
+        }
+      );
+      return c.json({ link: portal.link, mode: "dodo_hosted" });
+    } catch (err: any) {
+      return c.json({ error: err?.message || "Failed to open Customer Portal" }, 502);
+    }
+  }
+
+  return c.json({
+    mode: "dodo_test_sandbox",
+    customer_id: botApp.dodo_customer_id || "cus_test_sandbox",
+    subscription_id: botApp.dodo_subscription_id || "sub_test_sandbox",
+  });
+});
+
+// Test Mode Webhook & Payment Method Simulator (verifies signature via client.webhooks.unwrap)
+app.post("/v1/billing/test-webhook", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  await ensureSchema(sql);
+  const config = await loadDodoRuntimeConfig(sql, c.env);
+
+  if (config.environment !== "test_mode") {
+    return c.json(
+      { error: "Test webhook simulation is only available in test_mode" },
+      403
+    );
+  }
+
+  const body = await c.req.json();
+  const appId = String(body.app_id || "").trim();
+  const planSlug: VelocePlanSlug = body.plan === "studio" ? "studio" : "pro";
+  const scenario = String(body.scenario || "card_success").trim();
+  const cardNumber = String(body.card_number || "").replace(/\s+/g, "");
+  const upiVpa = String(body.upi_vpa || "").trim().toLowerCase();
+
+  if (!appId) {
+    return c.json({ error: "app_id is required" }, 400);
+  }
+
+  // Evaluate official Dodo test card numbers & UPI VPAs from testing-and-go-live
+  let effectiveScenario = scenario;
+  if (cardNumber) {
+    if (cardNumber === "4242424242424242") effectiveScenario = "card_success";
+    else if (cardNumber === "4000000000000002") effectiveScenario = "card_decline";
+    else if (cardNumber === "4000000000009995") effectiveScenario = "insufficient_funds";
+    else if (cardNumber === "4000000000000341") effectiveScenario = "renewal_failure";
+    else effectiveScenario = "card_decline";
+  } else if (upiVpa) {
+    if (upiVpa === "success@upi") effectiveScenario = "upi_success";
+    else effectiveScenario = "upi_failure";
+  }
+
+  const subId = `sub_test_${appId.replace(/^app_/, "").slice(0, 12)}`;
+  const cusId = `cus_test_${appId.replace(/^app_/, "").slice(0, 12)}`;
+  const payId = `pay_test_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  const productId =
+    planSlug === "studio"
+      ? config.studioProductId || "pdt_test_veloce_studio_1499"
+      : config.proProductId || "pdt_test_veloce_pro_599";
+  const priceCents = PLAN_CATALOG[planSlug].priceCents;
+  const nextBillingIso = new Date(Date.now() + 30 * 86400 * 1000).toISOString();
+
+  let eventType = "subscription.active";
+  let eventData: Record<string, any> = {
+    payload_type: "Subscription",
+    subscription_id: subId,
+    product_id: productId,
+    status: "active",
+    recurring_pre_tax_amount: priceCents,
+    currency: "USD",
+    cancel_at_next_billing_date: false,
+    next_billing_date: nextBillingIso,
+    customer: {
+      customer_id: cusId,
+      email: "developer@veloce.app",
+      name: "Discord Bot Owner",
+    },
+    metadata: {
+      app_id: appId,
+      plan: planSlug,
+    },
+  };
+
+  if (effectiveScenario === "card_decline" || effectiveScenario === "upi_failure") {
+    eventType = "payment.failed";
+    eventData = {
+      payload_type: "Payment",
+      payment_id: payId,
+      status: "failed",
+      error_code: "card_declined",
+      error_message:
+        effectiveScenario === "upi_failure"
+          ? "UPI payment failed (failure@upi)"
+          : "Card was declined by issuer (4000 0000 0000 0002)",
+      total_amount: priceCents,
+      currency: "USD",
+      customer: {
+        customer_id: cusId,
+        email: "developer@veloce.app",
+        name: "Discord Bot Owner",
+      },
+      metadata: { app_id: appId, plan: planSlug },
+    };
+  } else if (effectiveScenario === "insufficient_funds") {
+    eventType = "payment.failed";
+    eventData = {
+      payload_type: "Payment",
+      payment_id: payId,
+      status: "failed",
+      error_code: "insufficient_funds",
+      error_message: "Insufficient funds on card (4000 0000 0000 9995)",
+      total_amount: priceCents,
+      currency: "USD",
+      customer: {
+        customer_id: cusId,
+        email: "developer@veloce.app",
+        name: "Discord Bot Owner",
+      },
+      metadata: { app_id: appId, plan: planSlug },
+    };
+  } else if (effectiveScenario === "renewal_failure") {
+    eventType = "subscription.on_hold";
+    eventData.status = "on_hold";
+  } else if (effectiveScenario === "cancel_period_end") {
+    eventType = "subscription.cancelled";
+    eventData.status = "active";
+    eventData.cancel_at_next_billing_date = true;
+  } else if (effectiveScenario === "cancel_immediate") {
+    eventType = "subscription.cancelled";
+    eventData.status = "cancelled";
+    eventData.cancel_at_next_billing_date = false;
+  } else if (effectiveScenario === "refund") {
+    eventType = "refund.succeeded";
+    eventData = {
+      payload_type: "Refund",
+      refund_id: `rfnd_test_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`,
+      payment_id: payId,
+      status: "succeeded",
+      amount: priceCents,
+      currency: "USD",
+      customer: { customer_id: cusId, email: "developer@veloce.app" },
+      metadata: { app_id: appId, plan: planSlug },
+    };
+  }
+
+  const webhookId = `evt_test_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const webhookTimestamp = String(Math.floor(Date.now() / 1000));
+  const rawPayload = JSON.stringify({
+    business_id: "bus_test_veloce",
+    type: eventType,
+    timestamp: new Date().toISOString(),
+    data: eventData,
+  });
+
+  // Sign with Standard Webhooks HMAC-SHA256 (`webhook-id.webhook-timestamp.raw_body`)
+  const webhookSignature = await signStandardWebhookPayload(
+    rawPayload,
+    config.webhookKey,
+    webhookId,
+    webhookTimestamp
+  );
+
+  // Dispatch through the real Dodo SDK `client.webhooks.unwrap()` handler
+  const webhookResult = await handleVerifiedDodoWebhookRaw(
+    sql,
+    config,
+    rawPayload,
+    {
+      "webhook-id": webhookId,
+      "webhook-signature": webhookSignature,
+      "webhook-timestamp": webhookTimestamp,
+    },
+    (p) => c.executionCtx.waitUntil(p)
+  );
+
+  const updatedApps = await sql`
+    SELECT id, owner_user_id, name, description, enabled, discord_id, discord_public_key, discord_avatar, plan, custom_branding, discord_status, dodo_subscription_id, dodo_customer_id, subscription_status, cancel_at_next_billing_date, next_billing_date, created_at, updated_at
+    FROM apps
+    WHERE id = ${appId}
+    LIMIT 1
+  `;
+
+  return c.json({
+    success:
+      effectiveScenario === "card_success" ||
+      effectiveScenario === "upi_success" ||
+      effectiveScenario === "cancel_period_end" ||
+      effectiveScenario === "cancel_immediate" ||
+      effectiveScenario === "refund",
+    scenario: effectiveScenario,
+    webhook_id: webhookId,
+    event_type: eventType,
+    signature_verified: true,
+    webhook_result: webhookResult,
+    app: updatedApps[0] || null,
   });
 });
 

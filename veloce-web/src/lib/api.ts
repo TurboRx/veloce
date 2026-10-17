@@ -57,8 +57,30 @@ export interface App {
   plan?: "free" | "pro" | "studio";
   custom_branding?: boolean;
   discord_status?: AppDiscordStatus;
+  dodo_subscription_id?: string;
+  dodo_customer_id?: string;
+  subscription_status?: string;
+  cancel_at_next_billing_date?: boolean;
+  next_billing_date?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface DodoBillingStatus {
+  environment: "test_mode" | "live_mode";
+  base_url: string;
+  api_key_configured: boolean;
+  api_key_masked?: string | null;
+  webhook_key_configured: boolean;
+  pro_product_id: string;
+  studio_product_id: string;
+  webhook_endpoint: string;
+  recent_webhooks: Array<{
+    webhook_id: string;
+    event_type: string;
+    app_id?: string;
+    created_at: string;
+  }>;
 }
 
 
@@ -289,4 +311,60 @@ export const api = {
     request<GatewayStatus>(`/v1/apps/${appId}/gateway`),
   listGuilds: (appId: string) =>
     request<Guild[]>(`/v1/apps/${appId}/guilds`),
+
+  // Dodo Payments Billing & Test Mode
+  getBillingStatus: () => request<DodoBillingStatus>("/v1/billing/status"),
+  updateBillingConfig: (data: {
+    api_key?: string;
+    webhook_key?: string;
+    environment?: "test_mode" | "live_mode";
+    pro_product_id?: string;
+    studio_product_id?: string;
+  }) =>
+    request<{
+      success: boolean;
+      environment: string;
+      api_key_configured: boolean;
+      pro_product_id: string;
+      studio_product_id: string;
+      provisioning_error?: string | null;
+    }>("/v1/billing/config", { method: "POST", body: JSON.stringify(data) }),
+  createCheckoutSession: (data: {
+    app_id: string;
+    plan: "pro" | "studio";
+    customer_email?: string;
+    customer_name?: string;
+    discount_code?: string;
+    force_sandbox?: boolean;
+  }) =>
+    request<{
+      mode: "dodo_hosted" | "dodo_test_sandbox";
+      environment: string;
+      session_id: string;
+      checkout_url: string;
+      product_id: string;
+      plan: "pro" | "studio";
+      amount_cents?: number;
+    }>("/v1/billing/checkout", { method: "POST", body: JSON.stringify(data) }),
+  createPortalSession: (appId: string) =>
+    request<{ link?: string; mode: string; customer_id?: string; subscription_id?: string }>(
+      "/v1/billing/portal",
+      { method: "POST", body: JSON.stringify({ app_id: appId }) }
+    ),
+  triggerTestWebhook: (data: {
+    app_id: string;
+    plan: "pro" | "studio";
+    scenario?: string;
+    card_number?: string;
+    upi_vpa?: string;
+  }) =>
+    request<{
+      success: boolean;
+      scenario: string;
+      webhook_id: string;
+      event_type: string;
+      signature_verified: boolean;
+      webhook_result: any;
+      app: App | null;
+    }>("/v1/billing/test-webhook", { method: "POST", body: JSON.stringify(data) }),
 };
